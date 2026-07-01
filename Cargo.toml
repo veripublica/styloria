@@ -1,0 +1,11 @@
+[package]
+name = "styloria"
+version = "0.0.0"
+edition = "2021"
+description = "A pure-Rust CSS3 parser and serializer."
+license = "AGPL-3.0-only OR LicenseRef-veripublica-Commercial"
+publish = false
+
+[lib]
+name = "styloria"
+path = "src/lib.rs"

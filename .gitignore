@@ -1,0 +1,5 @@
+/target
+__pycache__/
+# styloria is a library — don't commit the lock file (convention: apps lock,
+# libraries don't; epubveri, as a CLI app, does commit its own Cargo.lock).
+/Cargo.lock
