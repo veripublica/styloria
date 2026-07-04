@@ -1,5 +1,9 @@
 /target
 __pycache__/
+
+# Local-only project context — not for publication (owner decision, matches
+# epubveri). Kept out of both GitHub and the published crate tarball.
+/CLAUDE.md
 # styloria is a library — don't commit the lock file (convention: apps lock,
 # libraries don't; epubveri, as a CLI app, does commit its own Cargo.lock).
 /Cargo.lock

@@ -3,7 +3,11 @@
 A pure-Rust CSS3 parser and serializer — a standalone, general-purpose
 library, not tied to any single consumer project.
 
-**Status: early / pre-alpha.** Just started; there is no working parser yet.
+**Status: early (0.x).** The [CSS Syntax Level 3](https://www.w3.org/TR/css-syntax-3/)
+tokenizer, parser (into a structural stylesheet model), and serializer work and
+are used in production by [`epubveri`](https://github.com/veripublica/epubveri).
+Property-level / semantic validation is the next layer, and the public API may
+still change before 1.0.
 
 ## Why
 
