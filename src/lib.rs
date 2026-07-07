@@ -2,6 +2,8 @@
 
 pub mod parser;
 pub mod serialize;
+pub mod span;
+pub mod spanned;
 pub mod token;
 pub mod tokenizer;
 
@@ -10,5 +12,6 @@ pub use parser::{
     Rule, SimpleBlock, Stylesheet,
 };
 pub use serialize::{serialize_declaration_list, serialize_stylesheet};
+pub use span::{Span, Spanned};
 pub use token::{NumericType, Token};
-pub use tokenizer::Tokenizer;
+pub use tokenizer::{SpannedTokens, Tokenizer};

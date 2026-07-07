@@ -9,6 +9,12 @@ are used in production by [`epubveri`](https://github.com/veripublica/epubveri).
 Property-level / semantic validation is the next layer, and the public API may
 still change before 1.0.
 
+As of 0.2, an optional **source-span** layer records the byte range (and thus
+`line:column`) of tokens and parse nodes, so a consumer can report the exact
+position of something it finds in the CSS — see the `span` and `spanned`
+modules and [`SPAN_PROTOTYPE.md`](./SPAN_PROTOTYPE.md). It is fully additive:
+the existing position-less parser and types are unchanged.
+
 ## Why
 
 Most CSS parsing in the Rust ecosystem lives inside larger, non-standalone

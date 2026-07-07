@@ -17,6 +17,7 @@
 
 use std::borrow::Cow;
 
+use crate::span::{Span, Spanned};
 use crate::token::{NumericType, Token};
 
 pub struct Tokenizer<'a> {
@@ -525,12 +526,52 @@ impl<'a> Tokenizer<'a> {
             }
         })
     }
+
+    /// Like [`next_token`](Self::next_token), but also returns the token's
+    /// source [`Span`] (its byte range in the input).
+    ///
+    /// Comments preceding the token are consumed first (as `next_token`
+    /// does), so the returned span covers only the token itself, never a
+    /// leading `/* … */`. The reported range is exactly the bytes the
+    /// tokenizer advanced over to produce this token, so `span.slice(input)`
+    /// round-trips to the token's source text.
+    pub fn next_token_spanned(&mut self) -> Option<Spanned<Token<'a>>> {
+        // Skip comments up front so `start` is the real token boundary;
+        // `next_token` calls `consume_comments` again, which is then a no-op.
+        self.consume_comments();
+        let start = self.pos;
+        let node = self.next_token()?;
+        let end = self.pos;
+        Some(Spanned {
+            node,
+            span: Span { start, end },
+        })
+    }
+
+    /// Adapt this tokenizer into an iterator of [`Spanned`] tokens.
+    pub fn spanned(self) -> SpannedTokens<'a> {
+        SpannedTokens { inner: self }
+    }
 }
 
 impl<'a> Iterator for Tokenizer<'a> {
     type Item = Token<'a>;
     fn next(&mut self) -> Option<Token<'a>> {
         self.next_token()
+    }
+}
+
+/// An iterator of [`Spanned`] tokens, produced by
+/// [`Tokenizer::spanned`]. Yields the same tokens as iterating the
+/// [`Tokenizer`] directly, each paired with its source [`Span`].
+pub struct SpannedTokens<'a> {
+    inner: Tokenizer<'a>,
+}
+
+impl<'a> Iterator for SpannedTokens<'a> {
+    type Item = Spanned<Token<'a>>;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next_token_spanned()
     }
 }
 
@@ -567,6 +608,68 @@ mod tests {
 
     fn tokens(input: &str) -> Vec<Token<'_>> {
         Tokenizer::new(input).collect()
+    }
+
+    fn spanned(input: &str) -> Vec<Spanned<Token<'_>>> {
+        Tokenizer::new(input).spanned().collect()
+    }
+
+    #[test]
+    fn spans_round_trip_to_source() {
+        let src = "body { color: red }";
+        for st in spanned(src) {
+            // Every token's span slices back to exactly the text that token
+            // was tokenized from (for tokens whose text is a literal slice).
+            match &st.node {
+                Token::Ident(name) => assert_eq!(st.span.slice(src), name.as_ref()),
+                Token::Colon => assert_eq!(st.span.slice(src), ":"),
+                Token::LeftCurly => assert_eq!(st.span.slice(src), "{"),
+                Token::RightCurly => assert_eq!(st.span.slice(src), "}"),
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn leading_comment_excluded_from_span() {
+        let src = "/* generated */ body";
+        let toks = spanned(src);
+        // The only non-whitespace token is `body`; its span must start at
+        // the 'b', not at the comment.
+        let ident = toks
+            .iter()
+            .find(|s| matches!(s.node, Token::Ident(_)))
+            .unwrap();
+        assert_eq!(ident.span.slice(src), "body");
+        assert_eq!(ident.span.start, src.find("body").unwrap());
+    }
+
+    #[test]
+    fn span_gives_line_and_column() {
+        // The end goal: locate a token by line:column, the way a validator
+        // would surface a CSS finding's exact position.
+        let src = "body {\n  color: red;\n}";
+        let (line, col) = spanned(src)
+            .into_iter()
+            .find(|s| matches!(&s.node, Token::Ident(n) if n.as_ref() == "color"))
+            .expect("expected the `color` ident")
+            .span
+            .start_line_col(src);
+        assert_eq!((line, col), (2, 3));
+    }
+
+    #[test]
+    fn bad_url_token_is_locatable() {
+        // A tokenizer-level error (a BadUrl) still carries a span, so a
+        // consumer can point at exactly where it is rather than at the whole
+        // file — the CSS analogue of what epubveri already does elsewhere.
+        let src = "a {\n  background: url(foo bar);\n}";
+        let bad = spanned(src)
+            .into_iter()
+            .find(|s| matches!(s.node, Token::BadUrl))
+            .expect("expected a BadUrl token");
+        assert_eq!(bad.span.start_line_col(src).0, 2);
+        assert!(bad.span.slice(src).starts_with("url("));
     }
 
     #[test]

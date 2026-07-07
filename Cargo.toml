@@ -1,6 +1,6 @@
 [package]
 name = "styloria"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "A pure-Rust CSS3 tokenizer, parser, and serializer (CSS Syntax Level 3)."
 license = "AGPL-3.0-only OR LicenseRef-veripublica-Commercial"
