@@ -9,17 +9,23 @@
 //!
 //! # Scope
 //!
-//! Declarations in qualified rules (`selector { … }`) are checked, including
-//! qualified rules nested inside **conditional group rules** — `@media`,
-//! `@supports`, `@container`, `@layer { … }`, `@scope` — which hold a rule
-//! list, not declarations. Other at-rule bodies are left alone on purpose:
-//! `@font-face`/`@page` hold *descriptors* (`src`, `size`) from a different
-//! vocabulary, and flagging those would be a false positive.
+//! Declarations in qualified rules (`selector { … }`) are checked against the
+//! set of CSS properties, including qualified rules nested inside **conditional
+//! group rules** — `@media`, `@supports`, `@container`, `@layer { … }`,
+//! `@scope` — which hold a rule list.
+//!
+//! **Descriptor at-rules** are checked too, each against its own vocabulary:
+//! `@font-face`, `@counter-style`, `@property`, `@font-palette-values`,
+//! `@view-transition`. `@page` is special — it mixes its page descriptors with
+//! ordinary properties, so it is checked against the union of both. At-rules
+//! whose body is not a descriptor list (`@keyframes`, `@font-feature-values`,
+//! …) are left alone.
 //!
 //! The guiding rule is asymmetric on purpose: **failing to flag an unknown
-//! property is safe; flagging a real one is not.** So every exemption below
-//! errs toward silence.
+//! name is safe; flagging a real one is not.** So every exemption below errs
+//! toward silence.
 
+use crate::descriptors::descriptors_for;
 use crate::known_properties::KNOWN_PROPERTIES;
 use crate::span::{Span, Spanned};
 use crate::spanned::{self, ComponentValue, Rule, SimpleBlock};
@@ -35,12 +41,31 @@ pub struct Diagnostic {
     pub name: String,
 }
 
-/// What a [`Diagnostic`] reports. One variant today; more as the layer grows.
+/// What a [`Diagnostic`] reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticKind {
-    /// A declaration whose property name CSS does not define, and which is
-    /// neither a custom property (`--*`) nor vendor-prefixed (`-webkit-…`).
+    /// A declaration in a style rule whose property name CSS does not define,
+    /// and which is neither custom (`--*`) nor vendor-prefixed (`-webkit-…`).
     UnknownProperty,
+    /// A declaration in an at-rule whose name that at-rule does not define as
+    /// a descriptor. `at_rule` is the canonical at-rule name without the `@`
+    /// (e.g. `"font-face"`).
+    UnknownDescriptor { at_rule: &'static str },
+}
+
+/// The vocabulary a declaration's name is checked against — which set of
+/// names is valid, and which [`DiagnosticKind`] an unknown one produces.
+enum Vocab {
+    /// A style rule: the name must be a known CSS property.
+    Property,
+    /// An at-rule: the name must be one of `names`. `at_rule` is the canonical
+    /// name for the diagnostic. `allow_properties` is set only for `@page`,
+    /// which also accepts ordinary properties alongside its descriptors.
+    Descriptor {
+        at_rule: &'static str,
+        names: &'static [&'static str],
+        allow_properties: bool,
+    },
 }
 
 /// Validate a stylesheet's declarations, returning every finding in source
@@ -59,15 +84,27 @@ pub fn validate_stylesheet(css: &str) -> Vec<Diagnostic> {
 fn validate_rules(rules: &[Spanned<Rule<'_>>], css: &str, out: &mut Vec<Diagnostic>) {
     for rule in rules {
         match &rule.node {
-            Rule::Qualified(q) => check_block(&q.block.node, out),
+            Rule::Qualified(q) => check_block(&q.block.node, &Vocab::Property, out),
             Rule::At(at) if is_conditional_group(&at.name) => {
                 if let Some(block) = &at.block {
                     validate_group_body(&block.node, css, out);
                 }
             }
-            // Other at-rules (@font-face, @page, …) hold descriptors, a
-            // different vocabulary — see the module-level docs.
-            Rule::At(_) => {}
+            Rule::At(at) => {
+                // A descriptor at-rule (@font-face, @counter-style, …): check
+                // its declarations against that at-rule's own vocabulary.
+                let lname = at.name.to_ascii_lowercase();
+                if let (Some((at_rule, names)), Some(block)) = (descriptors_for(&lname), &at.block)
+                {
+                    let vocab = Vocab::Descriptor {
+                        at_rule,
+                        names,
+                        allow_properties: at_rule == "page",
+                    };
+                    check_block(&block.node, &vocab, out);
+                }
+                // Any other at-rule body is not a descriptor list — left alone.
+            }
         }
     }
 }
@@ -107,7 +144,7 @@ fn validate_group_body(block: &SimpleBlock<'_>, css: &str, out: &mut Vec<Diagnos
 /// declarations the way CSS Syntax §5.4.2/§5.4.5 does, and check each
 /// declaration's property name. Every value already carries its absolute
 /// span, so findings need no offset remapping.
-fn check_block(block: &SimpleBlock<'_>, out: &mut Vec<Diagnostic>) {
+fn check_block(block: &SimpleBlock<'_>, vocab: &Vocab, out: &mut Vec<Diagnostic>) {
     let vals = &block.values;
     let mut i = 0;
     while i < vals.len() {
@@ -147,7 +184,7 @@ fn check_block(block: &SimpleBlock<'_>, out: &mut Vec<Diagnostic>) {
                     Some(ComponentValue::Token(Token::Colon))
                 );
                 if is_declaration {
-                    check_property(name, name_span, out);
+                    check_name(name, name_span, vocab, out);
                 }
                 // Advance past the whole declaration (or stray run): everything
                 // up to the next `;` is its value, per §5.4.5.
@@ -163,21 +200,34 @@ fn check_block(block: &SimpleBlock<'_>, out: &mut Vec<Diagnostic>) {
     }
 }
 
-/// Report `name` as unknown unless it is exempt. Property names are ASCII
-/// case-insensitive, so the lookup is done in lower case.
-fn check_property(name: &str, span: Span, out: &mut Vec<Diagnostic>) {
+/// Report `name` as unknown unless it is valid in `vocab` or exempt. Names are
+/// ASCII case-insensitive, so the lookup is done in lower case.
+fn check_name(name: &str, span: Span, vocab: &Vocab, out: &mut Vec<Diagnostic>) {
     // Any leading-dash name is exempt: `--*` is an author-defined custom
     // property, and `-webkit-`/`-moz-`/etc. are vendor extensions outside the
-    // standard registry. No standard property starts with a dash, so this
-    // exemption can never hide a typo of a real property.
+    // standard registry. No standard property or descriptor starts with a
+    // dash, so this exemption can never hide a typo of a real name.
     if name.starts_with('-') {
         return;
     }
     let lower = name.to_ascii_lowercase();
-    if KNOWN_PROPERTIES.binary_search(&lower.as_str()).is_err() {
+    let is_property = || KNOWN_PROPERTIES.binary_search(&lower.as_str()).is_ok();
+    let (valid, kind) = match vocab {
+        Vocab::Property => (is_property(), DiagnosticKind::UnknownProperty),
+        Vocab::Descriptor {
+            at_rule,
+            names,
+            allow_properties,
+        } => {
+            let ok = names.binary_search(&lower.as_str()).is_ok()
+                || (*allow_properties && is_property());
+            (ok, DiagnosticKind::UnknownDescriptor { at_rule })
+        }
+    };
+    if !valid {
         out.push(Diagnostic {
             span,
-            kind: DiagnosticKind::UnknownProperty,
+            kind,
             name: name.to_string(),
         });
     }
@@ -250,11 +300,75 @@ mod tests {
     }
 
     #[test]
-    fn at_rule_descriptors_are_not_flagged() {
-        // `src` is a valid @font-face descriptor, not a property — and this
-        // slice skips at-rule bodies entirely, so it must stay silent.
-        let css = "@font-face { font-family: Foo; src: url(f.woff2) }";
+    fn valid_font_face_descriptors_are_clean() {
+        let css = "@font-face { font-family: Foo; src: url(f.woff2); font-weight: 700 }";
         assert!(validate_stylesheet(css).is_empty());
+    }
+
+    #[test]
+    fn unknown_font_face_descriptor_is_flagged() {
+        // A property that is NOT a @font-face descriptor: `color` is a real
+        // property but meaningless in @font-face.
+        let css = "@font-face { font-family: Foo; color: red }";
+        let d = validate_stylesheet(css);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].name, "color");
+        assert_eq!(
+            d[0].kind,
+            DiagnosticKind::UnknownDescriptor {
+                at_rule: "font-face"
+            }
+        );
+        assert_eq!(d[0].span.slice(css), "color");
+    }
+
+    #[test]
+    fn misspelled_font_face_descriptor_is_flagged() {
+        let d = validate_stylesheet("@font-face { font-familly: Foo }");
+        assert_eq!(
+            d.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
+            ["font-familly"]
+        );
+    }
+
+    #[test]
+    fn page_accepts_both_descriptors_and_properties() {
+        // `size`/`marks` are @page descriptors; `margin`/`color` are ordinary
+        // properties @page also accepts — none should be flagged.
+        let css = "@page { size: A4; marks: crop; margin: 1cm; color: black }";
+        assert!(validate_stylesheet(css).is_empty());
+    }
+
+    #[test]
+    fn page_flags_a_genuine_unknown() {
+        let d = validate_stylesheet("@page { size: A4; bogus-thing: 1 }");
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].name, "bogus-thing");
+        assert_eq!(
+            d[0].kind,
+            DiagnosticKind::UnknownDescriptor { at_rule: "page" }
+        );
+    }
+
+    #[test]
+    fn property_at_rule_descriptors_are_checked() {
+        assert!(
+            validate_stylesheet("@property --x { syntax: \"<color>\"; inherits: false }")
+                .is_empty()
+        );
+        let d = validate_stylesheet("@property --x { syntax: \"<color>\"; nonsense: 1 }");
+        assert_eq!(
+            d.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
+            ["nonsense"]
+        );
+    }
+
+    #[test]
+    fn keyframes_body_is_not_descriptor_checked() {
+        // @keyframes holds keyframe blocks (from/to/percent), not descriptors,
+        // and those blocks' declarations ARE properties. It has no descriptor
+        // set, so it is left alone (a safe miss, not a false positive).
+        assert!(validate_stylesheet("@keyframes spin { from { color: red } }").is_empty());
     }
 
     #[test]
@@ -287,10 +401,22 @@ mod tests {
     }
 
     #[test]
-    fn font_face_inside_media_is_still_skipped() {
-        // Descriptors stay exempt even nested in a group rule.
-        let css = "@media print { @font-face { src: url(f.woff2) } p { color: red } }";
-        assert!(validate_stylesheet(css).is_empty());
+    fn font_face_nested_in_media_is_descriptor_checked() {
+        // Valid descriptors nested in a group rule stay clean...
+        let ok = "@media print { @font-face { src: url(f.woff2) } p { color: red } }";
+        assert!(validate_stylesheet(ok).is_empty());
+        // ...and an invalid one is caught, with the right kind.
+        let bad = "@media print { @font-face { srcc: url(f.woff2) } }";
+        let d = validate_stylesheet(bad);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].name, "srcc");
+        assert_eq!(
+            d[0].kind,
+            DiagnosticKind::UnknownDescriptor {
+                at_rule: "font-face"
+            }
+        );
+        assert_eq!(d[0].span.slice(bad), "srcc");
     }
 
     #[test]

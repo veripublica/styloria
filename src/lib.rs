@@ -1,5 +1,6 @@
 //! styloria — a pure-Rust CSS3 parser and serializer.
 
+mod descriptors;
 mod known_properties;
 pub mod parser;
 pub mod serialize;
