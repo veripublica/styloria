@@ -7,20 +7,21 @@
 //! does not recognise, each pinned to the exact `name_span` a tool can
 //! underline.
 //!
-//! # Scope of this slice
+//! # Scope
 //!
-//! Only declarations in **top-level qualified rules** (`selector { … }`) are
-//! checked. At-rule bodies are left alone on purpose: `@font-face`/`@page`
-//! hold *descriptors* (`src`, `size`) from a different vocabulary, and
-//! flagging those would be a false positive. Reaching declarations nested in
-//! conditional group rules (`@media`, `@supports`) is a deliberate next step.
+//! Declarations in qualified rules (`selector { … }`) are checked, including
+//! qualified rules nested inside **conditional group rules** — `@media`,
+//! `@supports`, `@container`, `@layer { … }`, `@scope` — which hold a rule
+//! list, not declarations. Other at-rule bodies are left alone on purpose:
+//! `@font-face`/`@page` hold *descriptors* (`src`, `size`) from a different
+//! vocabulary, and flagging those would be a false positive.
 //!
 //! The guiding rule is asymmetric on purpose: **failing to flag an unknown
 //! property is safe; flagging a real one is not.** So every exemption below
 //! errs toward silence.
 
 use crate::known_properties::KNOWN_PROPERTIES;
-use crate::span::Span;
+use crate::span::{Span, Spanned};
 use crate::spanned::{self, ComponentValue, Rule, SimpleBlock};
 use crate::token::Token;
 
@@ -44,17 +45,62 @@ pub enum DiagnosticKind {
 
 /// Validate a stylesheet's declarations, returning every finding in source
 /// order. Parses `css` with [`spanned::parse_stylesheet`] and checks each
-/// declaration in a top-level qualified rule (see the module docs for scope).
+/// declaration in a qualified rule, descending into conditional group
+/// at-rules (see the module docs for scope).
 pub fn validate_stylesheet(css: &str) -> Vec<Diagnostic> {
     let sheet = spanned::parse_stylesheet(css);
     let mut out = Vec::new();
-    for rule in &sheet.rules {
-        if let Rule::Qualified(q) = &rule.node {
-            check_block(&q.block.node, &mut out);
-        }
-        // At-rules are skipped in this slice — see the module-level docs.
-    }
+    validate_rules(&sheet.rules, css, &mut out);
     out
+}
+
+/// Check every qualified rule in `rules`, descending into conditional group
+/// at-rules. `css` is the source the rules' spans index into.
+fn validate_rules(rules: &[Spanned<Rule<'_>>], css: &str, out: &mut Vec<Diagnostic>) {
+    for rule in rules {
+        match &rule.node {
+            Rule::Qualified(q) => check_block(&q.block.node, out),
+            Rule::At(at) if is_conditional_group(&at.name) => {
+                if let Some(block) = &at.block {
+                    validate_group_body(&block.node, css, out);
+                }
+            }
+            // Other at-rules (@font-face, @page, …) hold descriptors, a
+            // different vocabulary — see the module-level docs.
+            Rule::At(_) => {}
+        }
+    }
+}
+
+/// True for at-rules whose body is a list of *rules* (which may contain
+/// qualified rules with declarations), as opposed to descriptors. Names are
+/// ASCII case-insensitive.
+fn is_conditional_group(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "media" | "supports" | "container" | "layer" | "scope"
+    )
+}
+
+/// A conditional group rule's body is itself a rule list. Re-parse that inner
+/// text with the full parser — so nested `@media`, `@supports` conditions,
+/// and a `@font-face` sitting inside are all handled exactly as at top level —
+/// then remap the sub-parse's spans back onto the original source.
+fn validate_group_body(block: &SimpleBlock<'_>, css: &str, out: &mut Vec<Diagnostic>) {
+    // The inner text runs from the first contained value to the last; this
+    // is exact and brace-independent (it works for an unterminated block).
+    let (Some(first), Some(last)) = (block.values.first(), block.values.last()) else {
+        return;
+    };
+    let base = first.span.start;
+    let inner = &css[base..last.span.end];
+    let sub = spanned::parse_stylesheet(inner);
+    let mut sub_diags = Vec::new();
+    validate_rules(&sub.rules, inner, &mut sub_diags);
+    for mut d in sub_diags {
+        d.span = Span::new(d.span.start + base, d.span.end + base);
+        out.push(d);
+    }
 }
 
 /// Walk a style block's raw component values, splitting them into
@@ -212,10 +258,48 @@ mod tests {
     }
 
     #[test]
-    fn declaration_inside_at_rule_is_not_checked_yet() {
-        // A typo inside @media is missed for now (safe: we never invent an
-        // error). This documents the current scope; when recursion lands,
-        // update this to expect the finding.
-        assert!(validate_stylesheet("@media print { p { font-eight: bold } }").is_empty());
+    fn declaration_inside_media_is_checked() {
+        let css = "@media print { p { font-eight: bold } }";
+        let d = validate_stylesheet(css);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].name, "font-eight");
+        // the remapped span still points at the property in the original text
+        assert_eq!(d[0].span.slice(css), "font-eight");
+    }
+
+    #[test]
+    fn declaration_inside_supports_is_checked() {
+        let css = "@supports (display: grid) { .g { colr: red } }";
+        let d = validate_stylesheet(css);
+        assert_eq!(
+            d.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
+            ["colr"]
+        );
+    }
+
+    #[test]
+    fn nested_conditional_groups_recurse() {
+        let css = "@media screen { @supports (gap: 1px) { a { bckground: red } } }";
+        let d = validate_stylesheet(css);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].name, "bckground");
+        assert_eq!(d[0].span.slice(css), "bckground");
+    }
+
+    #[test]
+    fn font_face_inside_media_is_still_skipped() {
+        // Descriptors stay exempt even nested in a group rule.
+        let css = "@media print { @font-face { src: url(f.woff2) } p { color: red } }";
+        assert!(validate_stylesheet(css).is_empty());
+    }
+
+    #[test]
+    fn multiple_rules_in_a_group_are_all_checked() {
+        let css = "@media all { a { colr: red } b { font-weight: bold } c { bg: blue } }";
+        let names: Vec<_> = validate_stylesheet(css)
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        assert_eq!(names, vec!["colr", "bg"]);
     }
 }
