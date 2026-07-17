@@ -21,6 +21,10 @@
 //! whose body is not a descriptor list (`@keyframes`, `@font-feature-values`,
 //! …) are left alone.
 //!
+//! For a bare list of declarations — the contents of an inline `style="…"`
+//! attribute — use [`validate_declaration_list`], which checks against the
+//! property vocabulary.
+//!
 //! The guiding rule is asymmetric on purpose: **failing to flag an unknown
 //! name is safe; flagging a real one is not.** So every exemption below errs
 //! toward silence.
@@ -28,7 +32,7 @@
 use crate::descriptors::descriptors_for;
 use crate::known_properties::KNOWN_PROPERTIES;
 use crate::span::{Span, Spanned};
-use crate::spanned::{self, ComponentValue, Rule, SimpleBlock};
+use crate::spanned::{self, ComponentValue, DeclarationListItem, Rule, SimpleBlock};
 use crate::token::Token;
 
 /// One validation finding, located by the source [`Span`] it concerns.
@@ -76,6 +80,22 @@ pub fn validate_stylesheet(css: &str) -> Vec<Diagnostic> {
     let sheet = spanned::parse_stylesheet(css);
     let mut out = Vec::new();
     validate_rules(&sheet.rules, css, &mut out);
+    out
+}
+
+/// Validate a bare list of declarations — the contents of an inline
+/// `style="…"` attribute — against the CSS property vocabulary. Each
+/// declaration's name span locates a finding, indexing directly into `css`.
+///
+/// A style attribute holds only declarations (no selectors, no rules); any
+/// stray at-rule in the input is ignored, as it carries no property.
+pub fn validate_declaration_list(css: &str) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for item in spanned::parse_declaration_list(css) {
+        if let DeclarationListItem::Declaration(d) = item {
+            check_name(&d.node.name, d.node.name_span, &Vocab::Property, &mut out);
+        }
+    }
     out
 }
 
@@ -361,6 +381,34 @@ mod tests {
             d.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
             ["nonsense"]
         );
+    }
+
+    #[test]
+    fn declaration_list_clean_when_all_known() {
+        // The shape of an inline style="…" attribute: a bare declaration list.
+        assert!(validate_declaration_list("color: red; font-weight: bold").is_empty());
+    }
+
+    #[test]
+    fn declaration_list_flags_unknown_property() {
+        let css = "color: red; font-eight: bold";
+        let d = validate_declaration_list(css);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].name, "font-eight");
+        assert_eq!(d[0].kind, DiagnosticKind::UnknownProperty);
+        assert_eq!(d[0].span.slice(css), "font-eight");
+    }
+
+    #[test]
+    fn declaration_list_exempts_custom_and_vendor() {
+        assert!(validate_declaration_list("--x: 1; -webkit-hyphens: auto").is_empty());
+    }
+
+    #[test]
+    fn declaration_list_ignores_important_and_empty() {
+        assert!(validate_declaration_list("color: red !important").is_empty());
+        assert!(validate_declaration_list("").is_empty());
+        assert!(validate_declaration_list("   ;  ; ").is_empty());
     }
 
     #[test]
