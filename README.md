@@ -6,14 +6,22 @@ library, not tied to any single consumer project.
 **Status: early (0.x).** The [CSS Syntax Level 3](https://www.w3.org/TR/css-syntax-3/)
 tokenizer, parser (into a structural stylesheet model), and serializer work and
 are used in production by [`epubveri`](https://github.com/veripublica/epubveri).
-Property-level / semantic validation is the next layer, and the public API may
-still change before 1.0.
+The public API may still change before 1.0.
 
 As of 0.2, an optional **source-span** layer records the byte range (and thus
 `line:column`) of tokens and parse nodes, so a consumer can report the exact
 position of something it finds in the CSS — see the `span` and `spanned`
 modules and [`SPAN_PROTOTYPE.md`](./SPAN_PROTOTYPE.md). It is fully additive:
 the existing position-less parser and types are unchanged.
+
+As of 0.3, a **validation** layer (`validate` module) checks declaration
+*names* against the CSS vocabulary: `validate_stylesheet` flags unknown
+properties in style rules (descending into `@media`/`@supports`) and unknown
+descriptors in at-rules (`@font-face`, `@counter-style`, `@page`, …);
+`validate_declaration_list` does the same for an inline `style="…"` attribute.
+Each finding carries the exact span to underline. Custom (`--*`) and
+vendor-prefixed names are exempt, and the check errs toward silence — it never
+invents an error. Value-level validation is a later layer.
 
 ## Why
 
