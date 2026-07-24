@@ -16,6 +16,7 @@ pub use parser::{
 };
 pub use serialize::{serialize_declaration_list, serialize_stylesheet};
 pub use span::{Span, Spanned};
+pub use spanned::{SyntaxError, SyntaxErrorKind};
 pub use token::{NumericType, Token};
 pub use tokenizer::{SpannedTokens, Tokenizer};
 pub use validate::{validate_declaration_list, validate_stylesheet, Diagnostic, DiagnosticKind};

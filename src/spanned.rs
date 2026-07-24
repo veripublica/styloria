@@ -28,6 +28,42 @@ use crate::span::{Span, Spanned};
 use crate::token::Token;
 use crate::tokenizer::{SpannedTokens, Tokenizer};
 
+/// A syntax error the parser recovered from while building the tree.
+///
+/// Distinct from a [`Diagnostic`](crate::Diagnostic), which is a *semantic*
+/// finding about a named construct (an unknown property, say) and carries the
+/// offending name. A syntax error is purely *positional* — the CSS was
+/// malformed at this span — so it has only a span and a reason, no name.
+///
+/// The parser is error-recovering per the CSS Syntax spec: it never fails,
+/// it discards the malformed part and continues. These record *what* it
+/// discarded and *where*, which a validating tool (e.g. an EPUB checker
+/// mapping them to a "CSS parse error" message) otherwise cannot see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyntaxError {
+    /// The source span of the malformed construct.
+    pub span: Span,
+    pub kind: SyntaxErrorKind,
+}
+
+/// What a [`SyntaxError`] reports. All are conditions the parser recovers
+/// from at a specific point in the CSS Syntax algorithms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyntaxErrorKind {
+    /// A `<bad-string-token>`: a string with an unescaped newline.
+    BadString,
+    /// A `<bad-url-token>`: a malformed unquoted `url( … )`.
+    BadUrl,
+    /// A declaration whose name was not followed by `:` (§5.4.5) — discarded.
+    MalformedDeclaration,
+    /// A qualified rule whose prelude reached EOF before its `{ … }` block.
+    UnterminatedRule,
+    /// A `{`, `[`, or `(` block that reached EOF before its closing bracket.
+    UnterminatedBlock,
+    /// A token where a declaration or at-rule was expected (§5.4.2) — discarded.
+    UnexpectedToken,
+}
+
 /// A component value, with spans on itself and every nested value. Mirrors
 /// [`crate::ComponentValue`].
 #[derive(Debug, Clone, PartialEq)]
@@ -100,26 +136,51 @@ pub struct Stylesheet<'a> {
 /// Parse a stylesheet into the span-carrying tree (CSS Syntax Level 3
 /// §5.3.3, same grammar as [`crate::Parser::parse_stylesheet`]).
 pub fn parse_stylesheet(input: &str) -> Stylesheet<'_> {
+    parse_stylesheet_with_errors(input).0
+}
+
+/// Parse a stylesheet and also return every [`SyntaxError`] the parser
+/// recovered from, in source order. The tree is identical to
+/// [`parse_stylesheet`]'s; this variant just also hands back what was
+/// discarded, for a tool that wants to report malformed CSS.
+pub fn parse_stylesheet_with_errors(input: &str) -> (Stylesheet<'_>, Vec<SyntaxError>) {
     let mut p = SpannedParser {
         tokens: Tokenizer::new(input).spanned().peekable(),
+        errors: Vec::new(),
     };
-    Stylesheet {
-        rules: p.consume_rules_list(true),
-    }
+    let rules = p.consume_rules_list(true);
+    (Stylesheet { rules }, p.errors)
+}
+
+/// The [`SyntaxError`]s in a stylesheet, in source order — a convenience over
+/// [`parse_stylesheet_with_errors`] for callers that only want the errors.
+pub fn syntax_errors(input: &str) -> Vec<SyntaxError> {
+    parse_stylesheet_with_errors(input).1
 }
 
 /// Parse a list of declarations into the span-carrying tree — the spanned
 /// mirror of [`crate::Parser::parse_declaration_list`]. Use this for a
 /// `style="…"` attribute's value, or an `@font-face` / `@page` body.
 pub fn parse_declaration_list(input: &str) -> Vec<DeclarationListItem<'_>> {
+    parse_declaration_list_with_errors(input).0
+}
+
+/// [`parse_declaration_list`] plus the [`SyntaxError`]s recovered from the
+/// declaration list (a `style="…"` attribute, or an at-rule body).
+pub fn parse_declaration_list_with_errors(
+    input: &str,
+) -> (Vec<DeclarationListItem<'_>>, Vec<SyntaxError>) {
     let mut p = SpannedParser {
         tokens: Tokenizer::new(input).spanned().peekable(),
+        errors: Vec::new(),
     };
-    p.consume_declaration_list()
+    let items = p.consume_declaration_list();
+    (items, p.errors)
 }
 
 struct SpannedParser<'a> {
     tokens: Peekable<SpannedTokens<'a>>,
+    errors: Vec<SyntaxError>,
 }
 
 impl<'a> SpannedParser<'a> {
@@ -150,11 +211,30 @@ impl<'a> SpannedParser<'a> {
                 Some(Token::Ident(_)) => {
                     if let Some(d) = self.consume_declaration() {
                         items.push(DeclarationListItem::Declaration(d));
+                    } else {
+                        // A malformed declaration (no `:`): §5.4.2 discards
+                        // everything up to the next `;`/EOF, so its leftover
+                        // tokens aren't re-parsed as another spurious
+                        // declaration (which would also double-report the
+                        // error). The item list is unchanged either way - a
+                        // failed declaration yields no item.
+                        while !matches!(self.peek_node(), None | Some(Token::Semicolon)) {
+                            self.consume_component_value();
+                        }
                     }
                 }
                 _ => {
                     // Parse error: discard one component value, keep going.
-                    self.consume_component_value();
+                    // If that value was itself a bad token, it already recorded
+                    // its own (more specific) error - don't double-report.
+                    let before = self.errors.len();
+                    let v = self.consume_component_value();
+                    if self.errors.len() == before {
+                        self.errors.push(SyntaxError {
+                            span: v.span,
+                            kind: SyntaxErrorKind::UnexpectedToken,
+                        });
+                    }
                 }
             }
         }
@@ -172,6 +252,10 @@ impl<'a> SpannedParser<'a> {
         let name_span = name_tok.span;
         self.skip_whitespace();
         if !matches!(self.peek_node(), Some(Token::Colon)) {
+            self.errors.push(SyntaxError {
+                span: name_span,
+                kind: SyntaxErrorKind::MalformedDeclaration,
+            });
             return None;
         }
         self.next();
@@ -227,7 +311,17 @@ impl<'a> SpannedParser<'a> {
         let mut start: Option<Span> = None;
         loop {
             match self.peek_node() {
-                None => return None,
+                None => {
+                    // Prelude ran to EOF with no `{ … }` block: a qualified rule
+                    // that never opened its block (§5.4.4 returns nothing).
+                    if let Some(s) = start {
+                        self.errors.push(SyntaxError {
+                            span: s,
+                            kind: SyntaxErrorKind::UnterminatedRule,
+                        });
+                    }
+                    return None;
+                }
                 Some(Token::LeftCurly) => {
                     let open = self.next().unwrap().span;
                     let block = self.consume_simple_block(BlockKind::Curly, open);
@@ -308,7 +402,22 @@ impl<'a> SpannedParser<'a> {
                 let span = st.span.to(end);
                 Spanned::new(ComponentValue::Function { name, args }, span)
             }
-            other => Spanned::new(ComponentValue::Token(other), st.span),
+            other => {
+                // A bad-string / bad-url token is the tokenizer's signal that
+                // it recovered from malformed input; record it where it sits.
+                match other {
+                    Token::BadString => self.errors.push(SyntaxError {
+                        span: st.span,
+                        kind: SyntaxErrorKind::BadString,
+                    }),
+                    Token::BadUrl => self.errors.push(SyntaxError {
+                        span: st.span,
+                        kind: SyntaxErrorKind::BadUrl,
+                    }),
+                    _ => {}
+                }
+                Spanned::new(ComponentValue::Token(other), st.span)
+            }
         }
     }
 
@@ -327,7 +436,15 @@ impl<'a> SpannedParser<'a> {
         let mut end = open;
         loop {
             match self.peek_node() {
-                None => break,
+                None => {
+                    // Reached EOF before the closing bracket (§ "consume a
+                    // simple block" stops at EOF, leaving the block unclosed).
+                    self.errors.push(SyntaxError {
+                        span: open,
+                        kind: SyntaxErrorKind::UnterminatedBlock,
+                    });
+                    break;
+                }
                 Some(t) if *t == close => {
                     end = self.next().unwrap().span;
                     break;
@@ -498,5 +615,71 @@ mod tests {
             .find(|v| matches!(&v.node, ComponentValue::Function { name, .. } if name == "rgb"))
             .expect("expected the rgb() function");
         assert_eq!(func.span.slice(src), "rgb(1, 2, 3)");
+    }
+
+    // --- syntax-error recovery ---
+
+    fn kinds(css: &str) -> Vec<SyntaxErrorKind> {
+        syntax_errors(css).into_iter().map(|e| e.kind).collect()
+    }
+
+    #[test]
+    fn clean_css_has_no_syntax_errors() {
+        assert!(syntax_errors("a { color: red; background: url(x.png) }").is_empty());
+    }
+
+    #[test]
+    fn bad_string_is_reported() {
+        // An unterminated string (newline before the closing quote) is a
+        // <bad-string-token>.
+        let css = "a { content: \"oops\n }";
+        assert!(kinds(css).contains(&SyntaxErrorKind::BadString));
+    }
+
+    #[test]
+    fn bad_url_is_reported() {
+        // An unquoted url() with an illegal character is a <bad-url-token>.
+        let css = "a { background: url(foo'bar) }";
+        assert!(kinds(css).contains(&SyntaxErrorKind::BadUrl));
+    }
+
+    #[test]
+    fn unterminated_rule_is_reported() {
+        // A prelude that reaches EOF with no `{ … }` block.
+        let errs = syntax_errors("a b c");
+        assert_eq!(errs.len(), 1);
+        assert_eq!(errs[0].kind, SyntaxErrorKind::UnterminatedRule);
+    }
+
+    #[test]
+    fn unterminated_block_is_reported() {
+        // A `{` that reaches EOF before its `}`. The error points at the `{`.
+        let css = "a { color: red";
+        let errs = syntax_errors(css);
+        assert_eq!(errs.len(), 1);
+        assert_eq!(errs[0].kind, SyntaxErrorKind::UnterminatedBlock);
+        assert_eq!(errs[0].span.slice(css), "{");
+    }
+
+    #[test]
+    fn malformed_declaration_in_a_declaration_list() {
+        // A name with no `:` in a declaration list (a style="…" attribute).
+        let (_, errs) = parse_declaration_list_with_errors("color red; width: 2px");
+        assert_eq!(errs.len(), 1);
+        assert_eq!(errs[0].kind, SyntaxErrorKind::MalformedDeclaration);
+    }
+
+    #[test]
+    fn unexpected_token_in_a_declaration_list() {
+        // A token where a declaration was expected, discarded (§5.4.2). Not
+        // double-counted with any bad-token error.
+        let (_, errs) = parse_declaration_list_with_errors("# color: red");
+        assert_eq!(
+            errs,
+            vec![SyntaxError {
+                span: errs[0].span,
+                kind: SyntaxErrorKind::UnexpectedToken,
+            }]
+        );
     }
 }

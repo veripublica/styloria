@@ -7,6 +7,33 @@ styloria is pre-1.0, so new features and breaking changes both land as
 minor-version bumps (`0.x.0`), per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+Syntax-error reporting: the parser recovers from malformed CSS per the CSS
+Syntax spec, and can now hand back *what* it recovered from and *where* —
+previously discarded silently. Additive; the tree and existing types are
+unchanged.
+
+### Added
+
+- **`spanned::parse_stylesheet_with_errors(css) -> (Stylesheet, Vec<SyntaxError>)`**
+  and **`spanned::parse_declaration_list_with_errors(css)`**, plus the
+  convenience **`spanned::syntax_errors(css) -> Vec<SyntaxError>`**. The plain
+  `parse_stylesheet` / `parse_declaration_list` are unchanged (they now discard
+  the collected errors).
+- **`SyntaxError { span, kind }`** and **`SyntaxErrorKind`** (`BadString`,
+  `BadUrl`, `MalformedDeclaration`, `UnterminatedRule`, `UnterminatedBlock`,
+  `UnexpectedToken`), re-exported at the crate root. A syntax error is purely
+  positional (span + reason, no name), distinct from a semantic `Diagnostic`.
+
+### Changed
+
+- A malformed declaration in a declaration list (`name` with no `:`) now
+  discards up to the next `;`/EOF per CSS Syntax §5.4.2, instead of letting its
+  leftover tokens be re-parsed as a second spurious declaration. The item list
+  is unchanged (a failed declaration yields no item); only the (new) error
+  reporting is affected.
+
 ## [0.3.0] - 2026-07-18
 
 A **validation** layer on top of the property-agnostic parser: it knows the
