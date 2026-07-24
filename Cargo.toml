@@ -1,7 +1,8 @@
 [package]
 name = "styloria"
-version = "0.3.0"
-edition = "2021"
+version = "0.4.0"
+edition = "2024"
+rust-version = "1.88"
 description = "A pure-Rust CSS3 tokenizer, parser, and serializer (CSS Syntax Level 3)."
 license = "AGPL-3.0-only OR LicenseRef-veripublica-Commercial"
 repository = "https://github.com/veripublica/styloria"

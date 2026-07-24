@@ -7,7 +7,7 @@ styloria is pre-1.0, so new features and breaking changes both land as
 minor-version bumps (`0.x.0`), per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
-## [Unreleased]
+## [0.4.0] - 2026-07-24
 
 Syntax-error reporting: the parser recovers from malformed CSS per the CSS
 Syntax spec, and can now hand back *what* it recovered from and *where* —
@@ -33,6 +33,8 @@ unchanged.
   leftover tokens be re-parsed as a second spurious declaration. The item list
   is unchanged (a failed declaration yields no item); only the (new) error
   reporting is affected.
+- Moved to Rust **edition 2024** (`rust-version = 1.88`), matching the sibling
+  crates. No API or behavior change.
 
 ## [0.3.0] - 2026-07-18
 

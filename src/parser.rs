@@ -209,7 +209,7 @@ impl<'a> Parser<'a> {
                         name,
                         prelude,
                         block: None,
-                    }
+                    };
                 }
                 Some(Token::Semicolon) => {
                     self.next();

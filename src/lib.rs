@@ -19,4 +19,4 @@ pub use span::{Span, Spanned};
 pub use spanned::{SyntaxError, SyntaxErrorKind};
 pub use token::{NumericType, Token};
 pub use tokenizer::{SpannedTokens, Tokenizer};
-pub use validate::{validate_declaration_list, validate_stylesheet, Diagnostic, DiagnosticKind};
+pub use validate::{Diagnostic, DiagnosticKind, validate_declaration_list, validate_stylesheet};
