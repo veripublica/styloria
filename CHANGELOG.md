@@ -7,6 +7,50 @@ styloria is pre-1.0, so new features and breaking changes both land as
 minor-version bumps (`0.x.0`), per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [0.5.0] - 2026-07-25
+
+Selector-list validation. CSS Syntax Level 3 hands a qualified rule's prelude
+on without looking at it, so `a > > b { }` parses as happily as valid CSS —
+correct per that spec, and useless to a tool reporting malformed CSS.
+
+### Added
+
+- **`selector::validate_selector_list(prelude) -> Vec<SyntaxError>`** (also
+  re-exported at the crate root), and the new
+  **`SyntaxErrorKind::InvalidSelector`** it reports. `parse_stylesheet_with_errors`
+  and `syntax_errors` now run it on every qualified rule, so existing callers
+  pick the new errors up with no code change.
+
+  The check is **syntactic only** — it never asks whether an element,
+  pseudo-class or attribute *name* is real, so `dvi:hovr[hrefff]` passes. It
+  reports the shapes a selector list cannot have: a combinator with nothing on
+  one side (`> p`, `a > > b`), an empty side of a comma, `.`/`|`/`:` with no
+  name after it, a malformed attribute selector (`[]`, `[=x]`, `[href=]`), and
+  tokens that cannot start a simple selector.
+
+  **Deliberately permissive in two named places**, because a false positive
+  here lands on somebody's real stylesheet: functional pseudo arguments are
+  not inspected at all (`:not()`, `:is()`, `:has()`, `:nth-child()` carry
+  grammars of their own that keep growing), and anything merely newer than
+  this code is accepted — `&` nesting, `::part()`, an unrecognised pseudo
+  name. Only shapes no version of Selectors can produce are reported.
+
+### Fixed
+
+- **A leading UTF-8 BOM (`U+FEFF`) is no longer tokenized as content.** CSS
+  Syntax §3.2 consumes it while determining the encoding, but a caller that
+  decoded the bytes itself (the common `from_utf8_lossy` case) hands it
+  straight through. Left in place it became a delim, which turned a following
+  `@charset` into a qualified rule's prelude and cascaded errors through the
+  rest of the stylesheet. Latent before this release; surfaced by the new
+  selector check on a real-world fixture.
+
+### Breaking
+
+- `SyntaxErrorKind` gained the `InvalidSelector` variant, so an exhaustive
+  `match` on it needs a new arm. (Pre-1.0: breaking changes land as minor
+  bumps.)
+
 ## [0.4.0] - 2026-07-24
 
 Syntax-error reporting: the parser recovers from malformed CSS per the CSS
