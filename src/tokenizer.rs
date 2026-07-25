@@ -27,7 +27,16 @@ pub struct Tokenizer<'a> {
 
 impl<'a> Tokenizer<'a> {
     pub fn new(input: &'a str) -> Self {
-        Tokenizer { input, pos: 0 }
+        // A leading U+FEFF is a byte-order mark, not content. CSS Syntax
+        // §3.2 consumes it while *determining the encoding*, so by the time
+        // the tokenizer runs it should already be gone — but a caller that
+        // decoded the bytes itself (the common case: `from_utf8_lossy` over a
+        // file that happens to start with a UTF-8 BOM) hands it straight
+        // through. Left in place it tokenizes as a delim, which turns the
+        // `@charset` rule after it into a qualified rule's prelude and
+        // cascades into spurious errors for the rest of the stylesheet.
+        let pos = usize::from(input.starts_with('\u{FEFF}')) * '\u{FEFF}'.len_utf8();
+        Tokenizer { input, pos }
     }
 
     fn nth_char(&self, n: usize) -> Option<char> {

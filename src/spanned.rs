@@ -62,6 +62,10 @@ pub enum SyntaxErrorKind {
     UnterminatedBlock,
     /// A token where a declaration or at-rule was expected (§5.4.2) — discarded.
     UnexpectedToken,
+    /// A qualified rule whose prelude is not a valid selector list
+    /// (Selectors Level 4 §3). See [`crate::selector`] for what is and isn't
+    /// reported — the check is syntactic and deliberately permissive.
+    InvalidSelector,
 }
 
 /// A component value, with spans on itself and every nested value. Mirrors
@@ -326,6 +330,11 @@ impl<'a> SpannedParser<'a> {
                     let open = self.next().unwrap().span;
                     let block = self.consume_simple_block(BlockKind::Curly, open);
                     let span = start.unwrap_or(block.span).to(block.span);
+                    // The Syntax spec hands the prelude on unexamined; read
+                    // it as a selector list so a malformed one is reported
+                    // rather than silently accepted (`crate::selector`).
+                    self.errors
+                        .extend(crate::selector::validate_selector_list(&prelude));
                     return Some(Spanned::new(QualifiedRule { prelude, block }, span));
                 }
                 _ => {
