@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref (e.g. rapid pushes to a PR).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+
+      # ubuntu-latest ships stable Rust + rustfmt/clippy; only the wasm target
+      # has to be added, for the smoke build below.
+      - name: Add wasm target
+        run: rustup target add wasm32-unknown-unknown
+
+      # No `--locked` anywhere here: styloria is a library and gitignores
+      # Cargo.lock, so there is nothing to lock against (same reasoning as
+      # publish-crate.yml, and the opposite of epubveri, which is a CLI app
+      # and does commit its lock file).
+      - name: Format (cargo fmt --check)
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --all-features
+
+      # styloria is what epubveri's CSS checks are built on, and epubveri
+      # ships a WebAssembly package - so anything that compiles here but not
+      # for wasm32 breaks a downstream release rather than this repo. Catch it
+      # on the commit that causes it, not two repos later.
+      - name: Build for wasm32
+        run: cargo build --lib --target wasm32-unknown-unknown
