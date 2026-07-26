@@ -7,6 +7,25 @@ styloria is pre-1.0, so new features and breaking changes both land as
 minor-version bumps (`0.x.0`), per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [0.6.1] - 2026-07-26
+
+**No library changes** — the parser, the API and the output are identical to
+0.6.0. This release exists to exercise the new automated pipeline end to end,
+and is a patch so that consumers on `0.6` pick it up (or ignore it) without
+touching their manifests.
+
+### Internal
+
+- Releases now publish to crates.io from CI, authenticated by **trusted
+  publishing (OIDC)**: a `v*` tag creates the GitHub Release *and* uploads the
+  crate, with no stored registry token and nothing typed by hand. Guarded by
+  tag/manifest version agreement, a no-op skip when the version is already
+  published, and the test suite against the tagged commit.
+- First CI workflow: `cargo fmt --check`, clippy with `-D warnings`, the
+  tests, and a `wasm32-unknown-unknown` build on every push and PR. The wasm
+  build is there for downstream consumers that ship WebAssembly — it catches
+  a wasm-incompatible change on the commit that causes it.
+
 ## [0.6.0] - 2026-07-26
 
 ### Added
