@@ -62,6 +62,9 @@ pub enum SyntaxErrorKind {
     UnterminatedBlock,
     /// A token where a declaration or at-rule was expected (§5.4.2) — discarded.
     UnexpectedToken,
+    /// A `U+…` unicode-range with more than six hex digits in a run — more
+    /// than any code point needs, so malformed under any reading.
+    InvalidUnicodeRange,
     /// A qualified rule whose prelude is not a valid selector list
     /// (Selectors Level 4 §3). See [`crate::selector`] for what is and isn't
     /// reported — the check is syntactic and deliberately permissive.
@@ -153,7 +156,10 @@ pub fn parse_stylesheet_with_errors(input: &str) -> (Stylesheet<'_>, Vec<SyntaxE
         errors: Vec::new(),
     };
     let rules = p.consume_rules_list(true);
-    (Stylesheet { rules }, p.errors)
+    let mut errors = p.errors;
+    errors.extend(unicode_range_errors(input));
+    errors.sort_by_key(|e| e.span.start);
+    (Stylesheet { rules }, errors)
 }
 
 /// The [`SyntaxError`]s in a stylesheet, in source order — a convenience over
@@ -179,7 +185,10 @@ pub fn parse_declaration_list_with_errors(
         errors: Vec::new(),
     };
     let items = p.consume_declaration_list();
-    (items, p.errors)
+    let mut errors = p.errors;
+    errors.extend(unicode_range_errors(input));
+    errors.sort_by_key(|e| e.span.start);
+    (items, errors)
 }
 
 struct SpannedParser<'a> {
@@ -690,5 +699,112 @@ mod tests {
                 kind: SyntaxErrorKind::UnexpectedToken,
             }]
         );
+    }
+}
+
+/// Malformed `U+…` unicode-ranges, as epubcheck's CSS scanner reports them
+/// (`SCANNER_ILLEGAL_URANGE`).
+///
+/// Its rule is narrower than it sounds: it walks the characters after `U+`
+/// that are hex digits, `?` or `-`, and errors when **seven** of them appear
+/// without an intervening `-`. Nothing else is checked — not the ordering of
+/// a range, not whether `?` only trails, not whether the endpoints make
+/// sense. Six hex digits is the most a real code point needs (`U+10FFFF`),
+/// so a run of seven is malformed under any reading, which is what makes this
+/// safe to report.
+///
+/// Detection walks the **token stream**, not the raw text. `U+00000000`
+/// inside a string or a comment is one `String` token or skipped entirely,
+/// so it cannot be mistaken for a range — which scanning the source directly
+/// would do.
+fn unicode_range_errors(input: &str) -> Vec<SyntaxError> {
+    const MAX_RUN: usize = 6;
+    let mut out = Vec::new();
+    for t in Tokenizer::new(input).spanned() {
+        // Anchor on the `u` ident, then read the source after it. Anchoring
+        // is what keeps a `U+…` inside a string or comment out of scope - it
+        // is one String token, or skipped, and never an Ident here.
+        //
+        // Reading the *source* rather than the following tokens is
+        // deliberate: `U+0-7F` tokenizes as Ident("U"), Number(+0), Delim,
+        // Dimension… because CSS Syntax Level 3 dropped the unicode-range
+        // token and `+0` is simply a number. The character run epubcheck
+        // counts does not survive that, so count it where it still exists.
+        let Token::Ident(name) = &t.node else {
+            continue;
+        };
+        if !name.eq_ignore_ascii_case("u") {
+            continue;
+        }
+        let after_ident = &input[t.span.end..];
+        if !after_ident.starts_with('+') {
+            continue;
+        }
+        let mut run = 0usize;
+        for (i, c) in after_ident[1..].char_indices() {
+            if c == '-' {
+                run = 0;
+                continue;
+            }
+            if !c.is_ascii_hexdigit() && c != '?' {
+                break;
+            }
+            run += 1;
+            if run > MAX_RUN {
+                out.push(SyntaxError {
+                    span: Span::new(t.span.start, t.span.end + 1 + i + c.len_utf8()),
+                    kind: SyntaxErrorKind::InvalidUnicodeRange,
+                });
+                break;
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod unicode_range_tests {
+    use super::{SyntaxErrorKind, syntax_errors};
+
+    fn ranges(css: &str) -> usize {
+        syntax_errors(css)
+            .into_iter()
+            .filter(|e| e.kind == SyntaxErrorKind::InvalidUnicodeRange)
+            .count()
+    }
+
+    /// Six hex digits is the most any code point needs (`U+10FFFF`), so
+    /// everything real must pass. The list is long on purpose: this check
+    /// makes us *stricter*, and the cost of a wrong entry is a rejected
+    /// stylesheet.
+    #[test]
+    fn real_unicode_ranges_are_accepted() {
+        for css in [
+            "@font-face { unicode-range: U+0-7F; }",
+            "@font-face { unicode-range: U+0025-00FF; }",
+            "@font-face { unicode-range: U+4??; }",
+            "@font-face { unicode-range: U+0-10FFFF; }",
+            "@font-face { unicode-range: U+10FFFF; }",
+            "@font-face { unicode-range: U+0-7F, U+80-FF; }",
+            "@font-face { unicode-range: u+26; }",
+            "@font-face { unicode-range: U+??????; }",
+        ] {
+            assert_eq!(ranges(css), 0, "must be accepted: {css}");
+        }
+    }
+
+    #[test]
+    fn over_long_runs_are_reported() {
+        assert_eq!(ranges("@font-face { unicode-range: U+0000000; }"), 1);
+        assert_eq!(ranges("@font-face { unicode-range: U+0-00000000; }"), 1);
+    }
+
+    /// The detection walks tokens, not raw text, so a `U+` that is really
+    /// part of a string or a comment cannot be mistaken for a range. Scanning
+    /// the source directly would report both of these.
+    #[test]
+    fn a_u_plus_inside_a_string_or_comment_is_not_a_range() {
+        assert_eq!(ranges("a { content: \"U+00000000\"; }"), 0);
+        assert_eq!(ranges("/* U+00000000 */ a { color: red }"), 0);
     }
 }

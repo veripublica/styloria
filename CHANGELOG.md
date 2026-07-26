@@ -7,6 +7,29 @@ styloria is pre-1.0, so new features and breaking changes both land as
 minor-version bumps (`0.x.0`), per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [0.6.0] - 2026-07-26
+
+### Added
+
+- **`SyntaxErrorKind::InvalidUnicodeRange`** — a `U+…` unicode-range with more
+  than six hex digits in a run, which is more than any code point needs
+  (`U+10FFFF` is the maximum), so malformed under any reading. This mirrors
+  what epubcheck's CSS scanner reports as `SCANNER_ILLEGAL_URANGE`, and its
+  rule really is only that: nothing checks range ordering, whether `?` only
+  trails, or whether the endpoints make sense.
+
+  Detection is anchored on the `u` **token**, so a `U+00000000` inside a
+  string or a comment cannot be mistaken for a range — scanning the source
+  text directly would report both. The character run is then counted in the
+  source, because it does not survive tokenization: CSS Syntax Level 3 dropped
+  the unicode-range token, so `U+0-7F` arrives as an ident, a number, a delim
+  and a dimension.
+
+### Breaking
+
+- `SyntaxErrorKind` gained a variant, so an exhaustive `match` on it needs a
+  new arm. (Pre-1.0: breaking changes land as minor bumps.)
+
 ## [0.5.0] - 2026-07-25
 
 Selector-list validation. CSS Syntax Level 3 hands a qualified rule's prelude
