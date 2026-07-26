@@ -28,6 +28,11 @@ fn escape_code_point(c: char, out: &mut String) {
 /// enables the ident-only rule that a name can't start (or start with `-`
 /// then) a digit without escaping it — hash-token values don't need this
 /// (`#123` is already unambiguous as a hash).
+// Two of the branches below escape the code point the same way, which clippy
+// reads as a duplicated block. They stay separate on purpose: one is the
+// control-character rule, the other the leading-digit rule, and they are
+// independent parts of the serialization spec that happen to share an action.
+#[allow(clippy::if_same_then_else)]
 fn serialize_name(s: &str, out: &mut String, check_leading_digit: bool) {
     let chars: Vec<char> = s.chars().collect();
     if chars.len() == 1 && chars[0] == '-' {
@@ -100,15 +105,14 @@ fn serialize_dimension_unit(unit: &str, out: &mut String) {
     // exponent (e.g. dimension `3` + unit `e2` must not re-serialize as the
     // number `3e2`).
     let mut chars = unit.chars();
-    if let Some(first) = chars.next() {
-        if matches!(first, 'e' | 'E')
-            && matches!(chars.clone().next(), Some(c) if c.is_ascii_digit() || c == '+' || c == '-')
-        {
-            escape_code_point(first, out);
-            let rest: String = chars.collect();
-            serialize_name(&rest, out, false);
-            return;
-        }
+    if let Some(first) = chars.next()
+        && matches!(first, 'e' | 'E')
+        && matches!(chars.clone().next(), Some(c) if c.is_ascii_digit() || c == '+' || c == '-')
+    {
+        escape_code_point(first, out);
+        let rest: String = chars.collect();
+        serialize_name(&rest, out, false);
+        return;
     }
     serialize_name(unit, out, false);
 }
