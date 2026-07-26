@@ -2,8 +2,9 @@ name: Release
 
 # styloria is a library crate (no binaries to attach), so a release is just a
 # GitHub Release whose body is this version's CHANGELOG.md section — extracted
-# automatically, so the notes never have to be filled in by hand. Publishing to
-# crates.io is done separately (`cargo publish`); this only creates the Release.
+# automatically, so the notes never have to be filled in by hand. The crates.io
+# upload is a separate workflow (`publish-crate.yml`) fired by the same tag, so
+# the two run in parallel and neither waits on the other.
 
 on:
   push:
