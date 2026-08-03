@@ -7,6 +7,31 @@ styloria is pre-1.0, so new features and breaking changes both land as
 minor-version bumps (`0.x.0`), per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [0.7.1] - 2026-08-03
+
+**No library changes** — the parser, the API and the output are identical to
+0.7.0. A patch, so consumers on `0.7` pick it up (or ignore it) without
+touching their manifests.
+
+### Internal
+
+- The release guard reads the manifest version with **jq** instead of an
+  inline `python3` one-liner, removing the last interpreter the release path
+  depended on. `cargo metadata` still supplies the JSON — it is cargo's own
+  parse of the manifest, the same source `cargo publish` reads.
+
+  `jq -e` is load-bearing rather than decoration: the python one-liner raised
+  `StopIteration` if the package was missing, but a bare jq filter prints
+  nothing and exits 0, which would compare the tag against an empty string
+  and pass. With `-e` a filter that matches nothing exits 4, and `pipefail`
+  carries that out of the pipe.
+
+  Verified in both directions before release — a mismatched tag exits 1 with
+  its `::error::` line, a missing package exits 4 — because this guard stands
+  in front of an upload that can never be undone. Publishing is also the only
+  way to exercise the changed guard in CI: `verify_only` checks out an
+  existing tag, and every existing tag predates the change.
+
 ## [0.7.0] - 2026-08-03
 
 A bound on parser recursion. Before this release a ~1.2 KB stylesheet could
