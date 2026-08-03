@@ -69,6 +69,17 @@ pub enum SyntaxErrorKind {
     /// (Selectors Level 4 §3). See [`crate::selector`] for what is and isn't
     /// reported — the check is syntactic and deliberately permissive.
     InvalidSelector,
+    /// Block/function nesting past
+    /// [`MAX_NESTING_DEPTH`](crate::parser::MAX_NESTING_DEPTH). The contents
+    /// below that point are discarded rather than parsed, so this is
+    /// reported once, at the outermost bracket that was refused.
+    ///
+    /// Unlike every other variant here this is not a defect in the CSS as
+    /// such — it is the parser declining to recurse further, because the
+    /// alternative is a stack overflow, which in Rust aborts the process
+    /// rather than raising a catchable error. Real stylesheets nest 2 deep;
+    /// anything reaching 256 is machine-generated or hostile.
+    NestingTooDeep,
 }
 
 /// A component value, with spans on itself and every nested value. Mirrors
@@ -154,6 +165,7 @@ pub fn parse_stylesheet_with_errors(input: &str) -> (Stylesheet<'_>, Vec<SyntaxE
     let mut p = SpannedParser {
         tokens: Tokenizer::new(input).spanned().peekable(),
         errors: Vec::new(),
+        depth: 0,
     };
     let rules = p.consume_rules_list(true);
     let mut errors = p.errors;
@@ -183,6 +195,7 @@ pub fn parse_declaration_list_with_errors(
     let mut p = SpannedParser {
         tokens: Tokenizer::new(input).spanned().peekable(),
         errors: Vec::new(),
+        depth: 0,
     };
     let items = p.consume_declaration_list();
     let mut errors = p.errors;
@@ -194,11 +207,48 @@ pub fn parse_declaration_list_with_errors(
 struct SpannedParser<'a> {
     tokens: Peekable<SpannedTokens<'a>>,
     errors: Vec<SyntaxError>,
+    /// Current block/function nesting depth; see
+    /// [`MAX_NESTING_DEPTH`](crate::parser::MAX_NESTING_DEPTH).
+    depth: usize,
 }
 
 impl<'a> SpannedParser<'a> {
     fn next(&mut self) -> Option<Spanned<Token<'a>>> {
         self.tokens.next()
+    }
+
+    /// Report the refusal and consume tokens until the already-opened block
+    /// is balanced again, without recursing. Returns the span of the token
+    /// that closed it (or the last one seen at EOF) so the caller can still
+    /// give the value a sensible extent.
+    ///
+    /// The error is pushed here rather than at each call site so the two
+    /// entry points (a block, a function) cannot disagree about whether the
+    /// refusal is reported — the silent-skip failure is the one a caller
+    /// cannot notice.
+    fn refuse_nesting(&mut self, open: Span) -> Span {
+        self.errors.push(SyntaxError {
+            span: open,
+            kind: SyntaxErrorKind::NestingTooDeep,
+        });
+        let mut depth = 1usize;
+        let mut end = open;
+        while let Some(t) = self.next() {
+            end = t.span;
+            match t.node {
+                Token::LeftCurly | Token::LeftSquare | Token::LeftParen | Token::Function(_) => {
+                    depth += 1
+                }
+                Token::RightCurly | Token::RightSquare | Token::RightParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return end;
+                    }
+                }
+                _ => {}
+            }
+        }
+        end
     }
     fn peek_node(&mut self) -> Option<&Token<'a>> {
         self.tokens.peek().map(|s| &s.node)
@@ -416,7 +466,19 @@ impl<'a> SpannedParser<'a> {
             Token::LeftSquare => self.finish_block_value(BlockKind::Square, st.span),
             Token::LeftParen => self.finish_block_value(BlockKind::Paren, st.span),
             Token::Function(name) => {
+                if self.depth >= crate::parser::MAX_NESTING_DEPTH {
+                    let end = self.refuse_nesting(st.span);
+                    return Spanned::new(
+                        ComponentValue::Function {
+                            name,
+                            args: Vec::new(),
+                        },
+                        st.span.to(end),
+                    );
+                }
+                self.depth += 1;
                 let (args, end) = self.consume_function_args(st.span);
+                self.depth -= 1;
                 let span = st.span.to(end);
                 Spanned::new(ComponentValue::Function { name, args }, span)
             }
@@ -440,7 +502,19 @@ impl<'a> SpannedParser<'a> {
     }
 
     fn finish_block_value(&mut self, kind: BlockKind, open: Span) -> Spanned<ComponentValue<'a>> {
+        if self.depth >= crate::parser::MAX_NESTING_DEPTH {
+            let end = self.refuse_nesting(open);
+            return Spanned::new(
+                ComponentValue::Block(SimpleBlock {
+                    kind,
+                    values: Vec::new(),
+                }),
+                open.to(end),
+            );
+        }
+        self.depth += 1;
         let block = self.consume_simple_block(kind, open);
+        self.depth -= 1;
         Spanned::new(ComponentValue::Block(block.node), block.span)
     }
 

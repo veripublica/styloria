@@ -7,6 +7,51 @@ styloria is pre-1.0, so new features and breaking changes both land as
 minor-version bumps (`0.x.0`), per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [0.7.0] - 2026-08-03
+
+A bound on parser recursion. Before this release a ~1.2 KB stylesheet could
+abort the host process.
+
+### Fixed
+
+- **Deeply nested CSS no longer overflows the stack.** "Consume a component
+  value" and "consume a simple block" are mutually recursive in CSS Syntax
+  Level 3, and nothing bounded the descent, so nesting cost one stack frame
+  per level. Four shapes reach it — `a{color:((((…))))}`,
+  `@media all{@media all{…}}`, `rgb(rgb(rgb(…)))` and `:is(:is(:is(…)))` —
+  and on 0.6.1 all four abort between 10,000 and 20,000 deep on an 8 MiB
+  main thread, proportionally sooner on a 2 MiB worker thread. In Rust a
+  stack overflow is `SIGABRT`, not a catchable panic, so no caller could
+  defend against this downstream; the bound has to live here.
+
+  Both parsers are bounded — the plain one and `spanned` — since a consumer
+  may use either, and fixing one would have left the other open.
+
+### Added
+
+- **`MAX_NESTING_DEPTH`** (256), the new limit, public so consumers can
+  reason about it. Sized from data rather than taste: across a 65-book EPUB
+  shelf the deepest stylesheet nests **2** (median 2, p95 2), CSS getting
+  deep only through `@media`-wrapped rules and nested functions. That leaves
+  the limit ~128x above real-world CSS and far below the crash.
+
+- **`SyntaxErrorKind::NestingTooDeep`**, reported by `spanned` when the
+  limit is reached. Unlike the other variants this is not a defect in the
+  CSS — it says the parser declined to descend and the content below that
+  point went unparsed. Reporting it rather than truncating silently is the
+  point: a caller cannot otherwise tell a refused stylesheet from a shallow
+  one.
+
+  Past the limit the parser stops descending but keeps consuming, so the
+  token stream stays balanced and the rest of the stylesheet still parses
+  normally.
+
+### Breaking
+
+- `SyntaxErrorKind` gained a variant, so an exhaustive `match` on it needs a
+  new arm. That compile error is intended — it is how a consumer finds out
+  there is a new condition to classify.
+
 ## [0.6.1] - 2026-07-26
 
 **No library changes** — the parser, the API and the output are identical to

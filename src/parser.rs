@@ -75,14 +75,65 @@ pub struct Stylesheet<'a> {
     pub rules: Vec<Rule<'a>>,
 }
 
+/// The deepest block/function nesting either parser will descend into.
+///
+/// "Consume a component value" and "consume a simple block" are mutually
+/// recursive in CSS Syntax Level 3, so nesting costs stack in proportion to
+/// depth: `a{color:((((…))))}`, `@media all{@media all{…}}`,
+/// `rgb(rgb(rgb(…)))` and `:is(:is(:is(…)))` all reach it. Measured on
+/// 0.6.1, all four abort the process between 10,000 and 20,000 deep on an
+/// 8 MiB main thread - from stylesheets of about 1.2 KB - and proportionally
+/// sooner on a 2 MiB worker thread. In Rust a stack overflow is `SIGABRT`,
+/// not a catchable panic, so no caller can defend against it downstream;
+/// the bound has to live here.
+///
+/// 256 comes from data: across a 65-book EPUB shelf the deepest stylesheet
+/// nests **2** (median 2, p95 2), because CSS gets deep only through
+/// `@media`-wrapped rules and nested functions. That leaves this limit ~128x
+/// above real-world CSS and far below the crash.
+///
+/// Past the limit the parser stops descending but keeps consuming, so the
+/// token stream stays balanced and the rest of the stylesheet still parses;
+/// [`crate::spanned`] additionally reports
+/// [`SyntaxErrorKind::NestingTooDeep`](crate::SyntaxErrorKind::NestingTooDeep).
+pub const MAX_NESTING_DEPTH: usize = 256;
+
 pub struct Parser<'a> {
     tokens: Peekable<Tokenizer<'a>>,
+    /// Current block/function nesting depth; see [`MAX_NESTING_DEPTH`].
+    depth: usize,
 }
 
 impl<'a> Parser<'a> {
     pub fn new(input: &'a str) -> Self {
         Parser {
             tokens: Tokenizer::new(input).peekable(),
+            depth: 0,
+        }
+    }
+
+    /// Consume tokens until the already-opened block is balanced again,
+    /// without recursing - the bounded counterpart to
+    /// `consume_block_contents`, used once [`MAX_NESTING_DEPTH`] is hit.
+    /// Counting every opener/closer rather than matching kinds is
+    /// deliberate: this path only ever runs on input no stylesheet would
+    /// contain, and staying balanced matters more than being picky about
+    /// which bracket closed what.
+    fn discard_balanced(&mut self) {
+        let mut depth = 1usize;
+        while let Some(t) = self.next() {
+            match t {
+                Token::LeftCurly | Token::LeftSquare | Token::LeftParen | Token::Function(_) => {
+                    depth += 1
+                }
+                Token::RightCurly | Token::RightSquare | Token::RightParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return;
+                    }
+                }
+                _ => {}
+            }
         }
     }
 
@@ -262,6 +313,24 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// One `{ … }` / `[ … ]` / `( … )` component value, bounded by
+    /// [`MAX_NESTING_DEPTH`]. Past the limit the block's contents are
+    /// discarded rather than descended into, which keeps the shape of the
+    /// value (an empty block) without another stack frame per level.
+    fn block(&mut self, kind: BlockKind) -> ComponentValue<'a> {
+        if self.depth >= MAX_NESTING_DEPTH {
+            self.discard_balanced();
+            return ComponentValue::Block(SimpleBlock {
+                kind,
+                values: Vec::new(),
+            });
+        }
+        self.depth += 1;
+        let values = self.consume_block_contents(kind);
+        self.depth -= 1;
+        ComponentValue::Block(SimpleBlock { kind, values })
+    }
+
     /// §5.4.7 "Consume a simple block" (the contents only — the caller has
     /// already consumed the opening bracket token).
     fn consume_block_contents(&mut self, kind: BlockKind) -> Vec<ComponentValue<'a>> {
@@ -304,34 +373,32 @@ impl<'a> Parser<'a> {
         match self.peek() {
             Some(Token::LeftCurly) => {
                 self.next();
-                ComponentValue::Block(SimpleBlock {
-                    kind: BlockKind::Curly,
-                    values: self.consume_block_contents(BlockKind::Curly),
-                })
+                self.block(BlockKind::Curly)
             }
             Some(Token::LeftSquare) => {
                 self.next();
-                ComponentValue::Block(SimpleBlock {
-                    kind: BlockKind::Square,
-                    values: self.consume_block_contents(BlockKind::Square),
-                })
+                self.block(BlockKind::Square)
             }
             Some(Token::LeftParen) => {
                 self.next();
-                ComponentValue::Block(SimpleBlock {
-                    kind: BlockKind::Paren,
-                    values: self.consume_block_contents(BlockKind::Paren),
-                })
+                self.block(BlockKind::Paren)
             }
             Some(Token::Function(_)) => {
                 let name = match self.next() {
                     Some(Token::Function(n)) => n,
                     _ => unreachable!(),
                 };
-                ComponentValue::Function {
-                    name,
-                    args: self.consume_function_args(),
+                if self.depth >= MAX_NESTING_DEPTH {
+                    self.discard_balanced();
+                    return ComponentValue::Function {
+                        name,
+                        args: Vec::new(),
+                    };
                 }
+                self.depth += 1;
+                let args = self.consume_function_args();
+                self.depth -= 1;
+                ComponentValue::Function { name, args }
             }
             Some(_) => ComponentValue::Token(self.next().unwrap()),
             None => unreachable!("consume_component_value called at EOF"),
@@ -466,5 +533,121 @@ mod tests {
         // present up to EOF).
         let sheet = Parser::parse_stylesheet("a { color: red");
         assert_eq!(sheet.rules.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod nesting_guard_tests {
+    use super::{MAX_NESTING_DEPTH, Parser};
+    use crate::spanned::{SyntaxErrorKind, syntax_errors};
+
+    /// The four shapes that reach the mutual recursion. Each aborted the
+    /// process between 10k and 20k deep before the guard; the assertion
+    /// that matters is that these return at all.
+    fn shapes(n: usize) -> Vec<(&'static str, String)> {
+        vec![
+            (
+                "paren",
+                format!("a{{color:{}red{}}}", "(".repeat(n), ")".repeat(n)),
+            ),
+            (
+                "curly",
+                format!("{}a{{color:red}}{}", "@media all{".repeat(n), "}".repeat(n)),
+            ),
+            (
+                "function",
+                format!("a{{color:{}1{}}}", "rgb(".repeat(n), ")".repeat(n)),
+            ),
+            (
+                "selector",
+                format!("{}a{}{{color:red}}", ":is(".repeat(n), ")".repeat(n)),
+            ),
+        ]
+    }
+
+    /// A stack overflow is `SIGABRT`, not a catchable panic - a regression
+    /// kills the test runner rather than failing an assert, so this test
+    /// completing *is* the assertion.
+    #[test]
+    fn pathological_nesting_does_not_abort_the_process() {
+        for (name, css) in shapes(100_000) {
+            let sheet = Parser::parse_stylesheet(&css);
+            assert!(!sheet.rules.is_empty(), "{name}: expected a rule back");
+            let _ = syntax_errors(&css);
+        }
+    }
+
+    /// The spanned parser reports the refusal rather than silently
+    /// truncating - a caller that cannot see the limit was hit would have
+    /// no way to tell a refused stylesheet from a shallow one.
+    #[test]
+    fn spanned_parser_reports_the_refusal() {
+        for (name, css) in shapes(MAX_NESTING_DEPTH + 5) {
+            let errs = syntax_errors(&css);
+            assert!(
+                errs.iter()
+                    .any(|e| e.kind == SyntaxErrorKind::NestingTooDeep),
+                "{name}: expected NestingTooDeep, got {errs:?}"
+            );
+        }
+    }
+
+    /// The false-positive direction: real stylesheets nest 2 deep (median
+    /// and p95 across a 65-book shelf), so ordinary CSS must stay silent.
+    #[test]
+    fn real_world_css_is_untouched() {
+        let css = "@media screen and (min-width: 40em) { \
+                   body { color: rgb(1, 2, 3); font: bold 12px/1.4 serif; } \
+                   a[href^=\"http\"]:not(.x) { margin: calc(1px + (2px * 3)); } }";
+        let errs = syntax_errors(css);
+        assert!(errs.is_empty(), "ordinary CSS must not report: {errs:?}");
+        assert_eq!(Parser::parse_stylesheet(css).rules.len(), 1);
+    }
+
+    /// Exactly at the limit still parses; one past it is refused. Without
+    /// this the guard could drift to an off-by-one and silently start
+    /// discarding one level of legitimate nesting.
+    #[test]
+    fn boundary_is_exact() {
+        let at = format!(
+            "a{{color:{}red{}}}",
+            "(".repeat(MAX_NESTING_DEPTH),
+            ")".repeat(MAX_NESTING_DEPTH)
+        );
+        assert!(
+            !syntax_errors(&at)
+                .iter()
+                .any(|e| e.kind == SyntaxErrorKind::NestingTooDeep),
+            "exactly at the limit must still parse"
+        );
+        let over = format!(
+            "a{{color:{}red{}}}",
+            "(".repeat(MAX_NESTING_DEPTH + 1),
+            ")".repeat(MAX_NESTING_DEPTH + 1)
+        );
+        assert!(
+            syntax_errors(&over)
+                .iter()
+                .any(|e| e.kind == SyntaxErrorKind::NestingTooDeep),
+            "one past the limit must be refused"
+        );
+    }
+
+    /// The discard path must stay balanced, or everything after a refused
+    /// block would be misparsed - turning a bounded refusal into a
+    /// corrupted parse of the rest of the stylesheet.
+    #[test]
+    fn parsing_resumes_after_a_refused_block() {
+        let css = format!(
+            "a{{color:{}red{}}} b{{color:blue}}",
+            "(".repeat(MAX_NESTING_DEPTH + 5),
+            ")".repeat(MAX_NESTING_DEPTH + 5)
+        );
+        let sheet = Parser::parse_stylesheet(&css);
+        assert_eq!(
+            sheet.rules.len(),
+            2,
+            "the rule after the refused one must still parse"
+        );
     }
 }
