@@ -65,8 +65,13 @@ jobs:
           set -euo pipefail
           tag="${{ inputs.tag || github.ref_name }}"
           want="${tag#v}"
+          # `cargo metadata` rather than reading Cargo.toml: it is cargo's own
+          # parse of the manifest, the same source `cargo publish` will use.
+          # `jq -e` exits non-zero if the filter matches nothing, so a renamed
+          # or missing package stops the release instead of comparing the tag
+          # against an empty string.
           got=$(cargo metadata --no-deps --format-version 1 \
-                | python3 -c "import json,sys; print(next(p['version'] for p in json.load(sys.stdin)['packages'] if p['name']=='styloria'))")
+                | jq -e -r '.packages[] | select(.name == "styloria") | .version')
           echo "tag=$want  Cargo.toml=$got"
           [ "$want" = "$got" ] || { echo "::error::tag $tag does not match Cargo.toml version $got"; exit 1; }
 
