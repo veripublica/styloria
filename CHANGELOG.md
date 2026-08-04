@@ -7,6 +7,20 @@ styloria is pre-1.0, so new features and breaking changes both land as
 minor-version bumps (`0.x.0`), per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [0.8.0] - 2026-08-04
+
+### Added
+
+- **`type_selector_names`** — every element name written bare at the head of a
+  compound selector in a qualified rule's prelude, with its span. `h4.note em`
+  yields `h4` and `em`; classes, ids, attributes, pseudos and `*` yield
+  nothing, and a namespace-qualified `svg|circle` yields the local name.
+
+  It reports what a selector *names*, not whether the name is a real element —
+  that needs a vocabulary this crate does not have. It exists so a consumer can
+  lint for a type selector that can match nothing: `h4a` is valid CSS and a
+  typo for `h4` or `.h4a`, and is otherwise invisible.
+
 ## [0.7.1] - 2026-08-03
 
 **No library changes** — the parser, the API and the output are identical to

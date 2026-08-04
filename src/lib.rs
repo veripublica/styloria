@@ -15,7 +15,7 @@ pub use parser::{
     AtRule, BlockKind, ComponentValue, Declaration, DeclarationListItem, Parser, QualifiedRule,
     Rule, SimpleBlock, Stylesheet,
 };
-pub use selector::validate_selector_list;
+pub use selector::{type_selector_names, validate_selector_list};
 pub use serialize::{serialize_declaration_list, serialize_stylesheet};
 pub use span::{Span, Spanned};
 pub use spanned::{SyntaxError, SyntaxErrorKind};

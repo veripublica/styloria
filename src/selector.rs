@@ -46,6 +46,74 @@ pub fn validate_selector_list(prelude: &[Spanned<ComponentValue<'_>>]) -> Vec<Sy
     errors
 }
 
+/// Every **type selector** name in a qualified rule's prelude, with its span.
+///
+/// A type selector is an element name written bare at the head of a compound
+/// selector — the `h4` in `h4.note`, `div` in `div > p`. Namespace-qualified
+/// forms (`svg|circle`) yield the local name; the universal selector `*`
+/// yields nothing, and neither do class, id, attribute or pseudo parts.
+///
+/// This reports *what the selector names*, not whether the name is a real
+/// element — that judgement needs a vocabulary this crate does not have and
+/// belongs to the caller. It exists for lint layers that want to say "this
+/// stylesheet targets `h4a`, which is not an element in any vocabulary the
+/// document can use"; a typo for `h4` or for `.h4a` is valid CSS and matches
+/// nothing, so it is invisible without a check like that.
+///
+/// Syntax errors are ignored here: a prelude that is not a selector list at
+/// all is `validate_selector_list`'s business, and this returns whatever
+/// names it can still see.
+pub fn type_selector_names<'a>(
+    prelude: &[Spanned<ComponentValue<'a>>],
+) -> Vec<Spanned<std::borrow::Cow<'a, str>>> {
+    let mut out = Vec::new();
+    let mut sink = Vec::new();
+    for part in split_on_commas(prelude, &mut sink) {
+        let mut expect_compound = true;
+        let mut i = 0;
+        while i < part.len() {
+            let cv = &part[i];
+            // Whitespace is the descendant combinator, so it starts a new
+            // compound just as `>` does — `h4.note em` names both `h4` and
+            // `em`, and treating whitespace as mere separation loses the
+            // second one.
+            if is_whitespace(&cv.node) || as_combinator(&cv.node).is_some() {
+                expect_compound = true;
+                i += 1;
+                continue;
+            }
+            if expect_compound && let ComponentValue::Token(Token::Ident(name)) = &cv.node {
+                // `ns|E`: the name is the tail, and the head was the prefix.
+                if matches!(
+                    part.get(i + 1).map(|c| &c.node),
+                    Some(ComponentValue::Token(Token::Delim('|')))
+                ) {
+                    if let Some(Spanned {
+                        node: ComponentValue::Token(Token::Ident(local)),
+                        span,
+                    }) = part.get(i + 2)
+                    {
+                        out.push(Spanned::new(local.clone(), *span));
+                    }
+                } else {
+                    out.push(Spanned::new(name.clone(), cv.span));
+                }
+            }
+            // Skip to the end of this compound: everything up to whitespace
+            // or a combinator belongs to the same one, and only its head can
+            // be a type selector.
+            while i < part.len()
+                && !is_whitespace(&part[i].node)
+                && as_combinator(&part[i].node).is_none()
+            {
+                i += 1;
+            }
+            expect_compound = false;
+        }
+    }
+    out
+}
+
 /// The comma-separated slices of a prelude, reporting an empty one as it
 /// goes. The error span is the comma itself: it is the token the author has
 /// to look at.
@@ -401,6 +469,41 @@ mod tests {
     /// book, so this list is deliberately long and deliberately includes
     /// selectors newer than this parser: the rule is that anything we don't
     /// understand is *accepted*, not reported.
+    fn type_names(css: &str) -> Vec<String> {
+        let sheet = crate::spanned::parse_stylesheet(css);
+        let mut out = Vec::new();
+        for rule in &sheet.rules {
+            if let crate::spanned::Rule::Qualified(q) = &rule.node {
+                out.extend(
+                    super::type_selector_names(&q.prelude)
+                        .into_iter()
+                        .map(|s| s.node.into_owned()),
+                );
+            }
+        }
+        out
+    }
+
+    /// `type_selector_names` reports the element name at the head of each
+    /// compound and nothing else — the input a vocabulary-aware lint needs.
+    #[test]
+    fn type_selector_names_are_the_compound_heads() {
+        assert_eq!(type_names("h4a{color:red}"), ["h4a"]);
+        assert_eq!(type_names("div>p{color:red}"), ["div", "p"]);
+        assert_eq!(type_names("h1,h2{color:red}"), ["h1", "h2"]);
+        assert_eq!(type_names("h4.note em{color:red}"), ["h4", "em"]);
+        // A namespace-qualified name yields the local part.
+        assert_eq!(type_names("svg|circle{fill:red}"), ["circle"]);
+        // Nothing that isn't a type selector.
+        assert_eq!(type_names(".note{color:red}"), Vec::<String>::new());
+        assert_eq!(type_names("#id{color:red}"), Vec::<String>::new());
+        assert_eq!(type_names("*{color:red}"), Vec::<String>::new());
+        assert_eq!(type_names("[hidden]{color:red}"), Vec::<String>::new());
+        assert_eq!(type_names(":root{color:red}"), Vec::<String>::new());
+        // The head only: `p.a.b` names `p` once, not its classes.
+        assert_eq!(type_names("p.a.b{color:red}"), ["p"]);
+    }
+
     #[test]
     fn valid_selectors_are_silent() {
         for css in [
