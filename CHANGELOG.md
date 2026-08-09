@@ -7,6 +7,31 @@ styloria is pre-1.0, so new features and breaking changes both land as
 minor-version bumps (`0.x.0`), per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [0.9.0] - 2026-08-09
+
+### Added
+
+- **`parse_rule_list`** — read already-parsed component values as a rule list,
+  returning the rules and their `SyntaxError`s. For the body of a
+  conditional-group at-rule (`@media`, `@supports`, `@container`, `@layer`),
+  which holds *rules* where an `@font-face` or `@page` body holds
+  *declarations*.
+
+  Preludes go through `validate_selector_list`, exactly as they do for a
+  top-level rule. Before this, a malformed selector was reported at the top
+  level and **silently accepted one `@media` deep** — CSS Syntax §5.4.2 hands
+  an at-rule's block on as a simple block, and nothing inside it was ever
+  re-entered as a rule, so the selector check was never reached (issue #2).
+
+  It takes component values rather than source text so that spans stay
+  **absolute**: errors point into the original stylesheet, not into a
+  re-tokenized fragment.
+
+  The crate still carries no per-at-rule knowledge — CSS Syntax does not say
+  which at-rules hold rule lists and which hold declarations, so the caller
+  decides *when* to call this. What the caller no longer has to reimplement is
+  where each nested rule's prelude ends.
+
 ## [0.8.0] - 2026-08-04
 
 ### Added

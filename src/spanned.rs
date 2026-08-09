@@ -204,6 +204,113 @@ pub fn parse_declaration_list_with_errors(
     (items, errors)
 }
 
+/// Read already-parsed component values as a **rule list**, returning the
+/// rules and the [`SyntaxError`]s found in them.
+///
+/// This is for the contents of a conditional-group at-rule — the body of an
+/// `@media`, `@supports`, `@container`, `@layer` — which holds *rules* where
+/// an `@font-face` or `@page` body holds *declarations*. CSS Syntax Level 3
+/// does not say which is which: §5.4.2 hands an at-rule's block on as a
+/// simple block and leaves its interpretation to that at-rule's own
+/// specification. This crate deliberately carries no such per-at-rule
+/// knowledge, so the caller decides *when* to call this; what the caller
+/// should not have to reimplement is where each nested rule's prelude ends,
+/// which is parsing.
+///
+/// The input is component values rather than source text so that **spans
+/// stay absolute** — errors point into the original stylesheet, not into a
+/// re-tokenized fragment.
+///
+/// Preludes go through [`crate::validate_selector_list`], exactly as they do
+/// for a top-level rule. Without this, a malformed selector was reported at
+/// the top level and silently accepted one `@media` deep, because nothing
+/// inside a simple block was ever re-entered as a rule (issue #2).
+///
+/// Nested at-rules are returned with their block unexamined, the same as at
+/// the top level: whether *their* body is a rule list is again the caller's
+/// question, so a caller walking `@media` inside `@media` recurses itself.
+pub fn parse_rule_list<'a>(
+    values: &[Spanned<ComponentValue<'a>>],
+) -> (Vec<Spanned<Rule<'a>>>, Vec<SyntaxError>) {
+    let mut rules = Vec::new();
+    let mut errors = Vec::new();
+    let mut prelude: Vec<Spanned<ComponentValue<'a>>> = Vec::new();
+    let mut at: Option<(Cow<'a, str>, Span)> = None;
+
+    for v in values {
+        match &v.node {
+            // Whitespace between rules is not part of the next prelude, and
+            // leading whitespace would otherwise become the reported span.
+            ComponentValue::Token(Token::Whitespace) if prelude.is_empty() && at.is_none() => {}
+            // `@name …;` — an at-rule with no block ends at the semicolon.
+            ComponentValue::Token(Token::Semicolon) if at.is_some() => {
+                let (name, name_span) = at.take().expect("semicolon arm requires an at-rule");
+                let span = name_span.to(v.span);
+                rules.push(Spanned::new(
+                    Rule::At(AtRule {
+                        name,
+                        name_span,
+                        prelude: std::mem::take(&mut prelude),
+                        block: None,
+                    }),
+                    span,
+                ));
+            }
+            ComponentValue::Token(Token::AtKeyword(n)) if at.is_none() && prelude.is_empty() => {
+                at = Some((n.clone(), v.span));
+            }
+            ComponentValue::Block(b) if b.kind == BlockKind::Curly => {
+                let block = Spanned::new(b.clone(), v.span);
+                match at.take() {
+                    Some((name, name_span)) => {
+                        let span = name_span.to(v.span);
+                        rules.push(Spanned::new(
+                            Rule::At(AtRule {
+                                name,
+                                name_span,
+                                prelude: std::mem::take(&mut prelude),
+                                block: Some(block),
+                            }),
+                            span,
+                        ));
+                    }
+                    None => {
+                        let prelude = std::mem::take(&mut prelude);
+                        errors.extend(crate::selector::validate_selector_list(&prelude));
+                        let span = prelude.first().map_or(v.span, |p| p.span).to(v.span);
+                        rules.push(Spanned::new(
+                            Rule::Qualified(QualifiedRule { prelude, block }),
+                            span,
+                        ));
+                    }
+                }
+            }
+            _ => prelude.push(v.clone()),
+        }
+    }
+
+    // A prelude that never met its block: the same §5.4.4 case
+    // `consume_qualified_rule` reports at the top level. Trailing whitespace
+    // alone is not a rule.
+    let trailing_content = prelude
+        .iter()
+        .any(|p| !matches!(&p.node, ComponentValue::Token(Token::Whitespace)));
+    if trailing_content || at.is_some() {
+        let span = at
+            .map(|(_, s)| s)
+            .or_else(|| prelude.first().map(|p| p.span));
+        if let Some(span) = span {
+            errors.push(SyntaxError {
+                span,
+                kind: SyntaxErrorKind::UnterminatedRule,
+            });
+        }
+    }
+
+    errors.sort_by_key(|e| e.span.start);
+    (rules, errors)
+}
+
 struct SpannedParser<'a> {
     tokens: Peekable<SpannedTokens<'a>>,
     errors: Vec<SyntaxError>,
@@ -880,5 +987,129 @@ mod unicode_range_tests {
     fn a_u_plus_inside_a_string_or_comment_is_not_a_range() {
         assert_eq!(ranges("a { content: \"U+00000000\"; }"), 0);
         assert_eq!(ranges("/* U+00000000 */ a { color: red }"), 0);
+    }
+}
+
+#[cfg(test)]
+mod rule_list_tests {
+    use super::*;
+
+    /// The values of the first top-level at-rule's block — what a caller
+    /// that knows `@media` holds rules would hand to `parse_rule_list`.
+    fn body(css: &str) -> (Stylesheet<'_>, Vec<Spanned<ComponentValue<'_>>>) {
+        let sheet = parse_stylesheet(css);
+        let values = match &sheet.rules[0].node {
+            Rule::At(a) => a
+                .block
+                .as_ref()
+                .expect("at-rule has a block")
+                .node
+                .values
+                .clone(),
+            Rule::Qualified(_) => panic!("expected an at-rule"),
+        };
+        (sheet, values)
+    }
+
+    fn errors(css: &str) -> Vec<SyntaxErrorKind> {
+        let (_sheet, values) = body(css);
+        parse_rule_list(&values)
+            .1
+            .into_iter()
+            .map(|e| e.kind)
+            .collect()
+    }
+
+    fn rules(css: &str) -> usize {
+        let (_sheet, values) = body(css);
+        parse_rule_list(&values).0.len()
+    }
+
+    /// The gap issue #2 was opened for: a malformed selector is reported at
+    /// the top level and was silently accepted one `@media` deep.
+    #[test]
+    fn a_nested_prelude_is_validated_as_a_selector_list() {
+        assert_eq!(
+            errors("@media print { . foo { color: red } }"),
+            vec![SyntaxErrorKind::InvalidSelector]
+        );
+        assert_eq!(
+            errors("@media print { img . foo { color: red } }"),
+            vec![SyntaxErrorKind::InvalidSelector]
+        );
+        // Both halves of a comma-separated list are checked, not just the
+        // first - the shape a real book turned out to carry.
+        assert_eq!(
+            errors("@media print { . a, . b { color: red } }"),
+            vec![
+                SyntaxErrorKind::InvalidSelector,
+                SyntaxErrorKind::InvalidSelector
+            ]
+        );
+        assert!(errors("@media print { p.foo, #b > i { color: red } }").is_empty());
+    }
+
+    /// Spans point into the original stylesheet. This is the whole reason
+    /// the entry point takes component values rather than a source slice.
+    #[test]
+    fn spans_stay_absolute() {
+        let css = "@media print { . foo { color: red } }";
+        let (_sheet, values) = body(css);
+        let errs = parse_rule_list(&values).1;
+        assert_eq!(errs.len(), 1);
+        assert_eq!(&css[errs[0].span.start..errs[0].span.start + 1], ".");
+        assert_eq!(errs[0].span.start, css.find(". foo").unwrap());
+    }
+
+    /// A nested at-rule is a rule, and its prelude is a condition — running
+    /// it through the selector check would invent errors on every one.
+    #[test]
+    fn a_nested_at_rule_is_not_read_as_a_selector() {
+        assert!(errors("@media print { @media (width > 0) { p { color: red } } }").is_empty());
+        assert_eq!(
+            rules("@media print { @media (width > 0) { p { color: red } } }"),
+            1
+        );
+        // The block-less form ends at its semicolon rather than swallowing
+        // the rule that follows.
+        assert!(errors("@media print { @import url(x.css); p { color: red } }").is_empty());
+        assert_eq!(
+            rules("@media print { @import url(x.css); p { color: red } }"),
+            2
+        );
+    }
+
+    /// Counting rules, so a boundary error cannot hide behind an empty
+    /// error list.
+    #[test]
+    fn rule_boundaries() {
+        assert_eq!(rules("@media print { }"), 0);
+        assert_eq!(rules("@media print { p { color: red } }"), 1);
+        assert_eq!(
+            rules("@media print { p { color: red } i { color: blue } }"),
+            2
+        );
+        // A `[]` block is part of a prelude, not a rule body (an attribute
+        // selector) - reading it as one is how the sibling bug in the
+        // consumer went, so it is pinned here too.
+        assert_eq!(rules("@media print { img[alt] { color: red } }"), 1);
+        assert!(errors("@media print { img[alt] { color: red } }").is_empty());
+    }
+
+    /// A prelude that never meets its block, the §5.4.4 case the top-level
+    /// parser already reports. Trailing whitespace alone is not a rule.
+    #[test]
+    fn an_unterminated_nested_rule_is_reported() {
+        let (_sheet, values) = body("@media print { p { color: red } i");
+        assert_eq!(
+            parse_rule_list(&values)
+                .1
+                .into_iter()
+                .map(|e| e.kind)
+                .collect::<Vec<_>>(),
+            vec![SyntaxErrorKind::UnterminatedRule]
+        );
+        assert!(errors("@media print { p { color: red } ").is_empty());
+        assert!(errors("@media print {  }").is_empty());
     }
 }
