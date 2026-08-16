@@ -36,12 +36,32 @@ use crate::token::Token;
 /// Report every place a qualified rule's prelude fails to be a selector
 /// list. An empty result means "this is a selector list as far as syntax
 /// goes" — not that the selector matches anything.
+///
+/// **At most one error per comma-separated selector.** The granularity is
+/// deliberate and sits between two wrong answers. Reporting per bad *token*
+/// turns one broken construct into a pile: a stylesheet beginning with a
+/// stray declaration, `text-indent:1.5em;`, is read as a qualified rule whose
+/// prelude is that text, and walking it token by token blamed the `:`, the
+/// `1.5em`, the `;` and the `@` of the next rule — four errors for one
+/// mistake, where a browser and epubcheck each see one. Reporting per
+/// *prelude* would be too coarse the other way: `. h-100, . y-100 { }` really
+/// is two independently broken selectors, and naming both is the thing a
+/// caller can act on.
+///
+/// Note this is not the same as stopping at the first error. Each part is
+/// still walked in full, because `validate_complex` recurses into attribute
+/// selectors and the walk is what finds them; only the *reporting* is capped.
 pub fn validate_selector_list(prelude: &[Spanned<ComponentValue<'_>>]) -> Vec<SyntaxError> {
     let mut errors = Vec::new();
     // A prelude splits on top-level commas into complex selectors. An empty
     // side (`, p`, `a,`, `a,,b`) is the one comma error worth reporting.
     for part in split_on_commas(prelude, &mut errors) {
-        validate_complex(part, &mut errors);
+        let mut part_errors = Vec::new();
+        validate_complex(part, &mut part_errors);
+        // The earliest one: it is where the author has to start reading, and
+        // everything after it is usually this parser losing its footing
+        // rather than a second independent mistake.
+        errors.extend(part_errors.into_iter().next());
     }
     errors
 }
@@ -621,5 +641,52 @@ mod tests {
     fn a_bad_selector_does_not_swallow_the_stylesheet() {
         let sheet = crate::spanned::parse_stylesheet("> bad { color: red } p { color: blue }");
         assert_eq!(sheet.rules.len(), 2, "both rules still parse");
+    }
+
+    /// #3: the reporting unit is the comma-separated selector - not the bad
+    /// token, and not the whole prelude.
+    ///
+    /// A stylesheet beginning with a stray declaration is the shape that
+    /// exposed it: per CSS Syntax the whole of `text-indent:1.5em;\n@page`
+    /// becomes one qualified rule's prelude, so a per-token walk blamed the
+    /// `:`, the `1.5em`, the `;` and the `@page` of the *next* rule - four
+    /// errors for one mistake, the last of them pointing at well-formed CSS.
+    ///
+    /// The two-selector case is the invariant in the other direction and the
+    /// reason this is not simply "report the first error and stop": `. h-100,
+    /// . y-100` really is two independently broken selectors and a caller
+    /// fixing them needs both named.
+    #[test]
+    fn a_broken_selector_is_reported_once_not_once_per_token() {
+        assert_eq!(
+            sel_errors("text-indent:1.5em;\n@page { margin: 1em; }"),
+            1,
+            "one stray declaration is one error, not one per token"
+        );
+        assert_eq!(
+            sel_errors(". h-100, . y-100 { height: 99vh; }"),
+            2,
+            "two separately broken selectors are still two errors"
+        );
+        assert_eq!(sel_errors("img . portrait { height: 99vh; }"), 1);
+        assert_eq!(sel_errors("p { color: red }"), 0, "valid stays silent");
+    }
+
+    /// The cap is per part, so an empty comma side is unaffected: it is
+    /// reported by `split_on_commas` before any part is walked.
+    #[test]
+    fn capping_per_selector_leaves_the_comma_errors_alone() {
+        assert_eq!(sel_errors("a,, b { color: red }"), 1, "the empty side");
+        assert_eq!(sel_errors("a, { color: red }"), 1, "the trailing comma");
+        // One bad part next to a good one: still exactly one.
+        assert_eq!(sel_errors("p, . q { color: red }"), 1);
+    }
+
+    /// Capping the *reporting* must not cap the *walk*: `validate_complex`
+    /// recurses into attribute selectors, and stopping early would stop
+    /// finding them. Two bad attribute selectors in two parts is two errors.
+    #[test]
+    fn the_walk_still_descends_after_the_first_report() {
+        assert_eq!(sel_errors("a[=x], b[=y] { color: red }"), 2);
     }
 }
