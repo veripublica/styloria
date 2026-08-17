@@ -204,6 +204,87 @@ pub fn parse_declaration_list_with_errors(
     (items, errors)
 }
 
+/// Read already-parsed component values as a **declaration list**, returning
+/// the declarations and the [`SyntaxError`]s found in them.
+///
+/// The twin of [`parse_rule_list`], and for the same reason: a `{ … }` block
+/// holds either rules or declarations, CSS Syntax Level 3 does not say which,
+/// and the caller is the one who knows. What the caller should not have to
+/// reimplement is where each declaration ends — that is parsing, and doing it
+/// downstream is how "is this a well-formed declaration" ended up living
+/// outside this crate (issue #4).
+///
+/// The input is component values rather than source text for the same reason
+/// as [`parse_rule_list`]: **spans stay absolute**, so a caller can report a
+/// line and column in the original stylesheet.
+///
+/// One error per declaration, not per token: a chunk that cannot be a
+/// declaration is reported once and discarded to the next `;`, matching
+/// §5.4.2 and the token-based [`parse_declaration_list_with_errors`].
+///
+/// An empty chunk (`{;}`, `a;;b`) is **not** an error — §5.4.4 discards a
+/// stray `<semicolon-token>`, so it is valid CSS and this stays silent about
+/// it. epubcheck's older parser disagrees; that is a parity decision for a
+/// consumer to document, not a spec question for this crate.
+pub fn parse_declaration_list_from_values<'a>(
+    values: &[Spanned<ComponentValue<'a>>],
+) -> (Vec<DeclarationListItem<'a>>, Vec<SyntaxError>) {
+    let mut items = Vec::new();
+    let mut errors = Vec::new();
+    for chunk in values.split(|v| matches!(&v.node, ComponentValue::Token(Token::Semicolon))) {
+        let mut it = chunk
+            .iter()
+            .filter(|v| !matches!(&v.node, ComponentValue::Token(Token::Whitespace)));
+        let Some(first) = it.next() else {
+            continue; // empty chunk: a stray `;`, discarded by §5.4.4
+        };
+        match &first.node {
+            ComponentValue::Token(Token::Ident(name)) => {
+                if matches!(
+                    it.next().map(|v| &v.node),
+                    Some(ComponentValue::Token(Token::Colon))
+                ) {
+                    let value: Vec<Spanned<ComponentValue<'a>>> = it.cloned().collect();
+                    let important = value.iter().rev().any(|v| {
+                        matches!(&v.node, ComponentValue::Token(Token::Ident(i))
+                            if i.eq_ignore_ascii_case("important"))
+                    }) && value
+                        .iter()
+                        .rev()
+                        .any(|v| matches!(&v.node, ComponentValue::Token(Token::Delim('!'))));
+                    let span = first.span.to(chunk.last().unwrap_or(first).span);
+                    items.push(DeclarationListItem::Declaration(Spanned::new(
+                        Declaration {
+                            name: name.clone(),
+                            name_span: first.span,
+                            value,
+                            important,
+                        },
+                        span,
+                    )));
+                } else {
+                    errors.push(SyntaxError {
+                        span: first.span,
+                        kind: SyntaxErrorKind::MalformedDeclaration,
+                    });
+                }
+            }
+            // An at-rule inside a declaration list (`@page { @top-center {…} }`)
+            // is handed back unexamined, exactly as `parse_rule_list` does with
+            // a nested at-rule: whether its body is declarations or rules is
+            // again the caller's question.
+            ComponentValue::Token(Token::AtKeyword(_)) => {}
+            _ => {
+                errors.push(SyntaxError {
+                    span: first.span,
+                    kind: SyntaxErrorKind::UnexpectedToken,
+                });
+            }
+        }
+    }
+    (items, errors)
+}
+
 /// Read already-parsed component values as a **rule list**, returning the
 /// rules and the [`SyntaxError`]s found in them.
 ///
@@ -394,9 +475,23 @@ impl<'a> SpannedParser<'a> {
                     }
                 }
                 _ => {
-                    // Parse error: discard one component value, keep going.
-                    // If that value was itself a bad token, it already recorded
-                    // its own (more specific) error - don't double-report.
+                    // Parse error. §5.4.2: reconsume, then "as long as the
+                    // next input token is anything other than a
+                    // <semicolon-token> or <EOF-token>, consume a component
+                    // value and throw away the returned value" - i.e. discard
+                    // the whole malformed declaration, exactly as the ident
+                    // branch above already does.
+                    //
+                    // This used to discard a single component value and loop,
+                    // which reported one error per token rather than per
+                    // declaration: `1px: red` gave UnexpectedToken twice and
+                    // then MalformedDeclaration, three errors for one broken
+                    // declaration. A consumer mapping every SyntaxErrorKind to
+                    // one message id sees that as three findings (#4).
+                    //
+                    // If the first value was itself a bad token it already
+                    // recorded its own, more specific error - don't
+                    // double-report.
                     let before = self.errors.len();
                     let v = self.consume_component_value();
                     if self.errors.len() == before {
@@ -404,6 +499,9 @@ impl<'a> SpannedParser<'a> {
                             span: v.span,
                             kind: SyntaxErrorKind::UnexpectedToken,
                         });
+                    }
+                    while !matches!(self.peek_node(), None | Some(Token::Semicolon)) {
+                        self.consume_component_value();
                     }
                 }
             }
@@ -858,6 +956,59 @@ mod tests {
         assert_eq!(errs.len(), 1);
         assert_eq!(errs[0].kind, SyntaxErrorKind::UnterminatedBlock);
         assert_eq!(errs[0].span.slice(css), "{");
+    }
+
+    /// The two declaration-list entry points must not drift. One takes source
+    /// text, the other already-parsed component values (so spans stay
+    /// absolute); they share the same rules and are asserted to agree here,
+    /// because the reason the values-based one exists is that a consumer was
+    /// hand-rolling it and getting a different answer (#4).
+    #[test]
+    fn both_declaration_list_entry_points_agree() {
+        for body in [
+            "color: red",
+            ";color: red",
+            "color: red;;",
+            "color red",
+            "1px: red",
+            "color: red; width: 2px",
+            "color red; width: 2px",
+            "1px: red; color: blue",
+            "color: red !important",
+            "",
+        ] {
+            let (a_items, a_errs) = parse_declaration_list_with_errors(body);
+            let css = format!("a {{{body}}}");
+            let sheet = parse_stylesheet(&css);
+            let values = match &sheet.rules.first().expect("one rule").node {
+                Rule::Qualified(q) => q.block.node.values.clone(),
+                _ => panic!("expected a qualified rule"),
+            };
+            let (b_items, b_errs) = parse_declaration_list_from_values(&values);
+            assert_eq!(
+                a_items.len(),
+                b_items.len(),
+                "declaration count differs for {body:?}"
+            );
+            let a: Vec<_> = a_errs.iter().map(|e| e.kind).collect();
+            let b: Vec<_> = b_errs.iter().map(|e| e.kind).collect();
+            assert_eq!(a, b, "errors differ for {body:?}");
+        }
+    }
+
+    /// §5.4.2 discards a malformed declaration up to the next `;`, so one
+    /// broken declaration is one error - not one per token. `1px: red` used to
+    /// give UnexpectedToken twice and then MalformedDeclaration, which a
+    /// consumer mapping every kind to a single message id reports three times.
+    #[test]
+    fn a_malformed_declaration_is_one_error_not_one_per_token() {
+        let (items, errs) = parse_declaration_list_with_errors("1px: red");
+        assert_eq!(errs.len(), 1, "got {errs:?}");
+        assert_eq!(items.len(), 0);
+        // Recovery still resumes at the next declaration.
+        let (items, errs) = parse_declaration_list_with_errors("1px: red; color: blue");
+        assert_eq!(errs.len(), 1, "got {errs:?}");
+        assert_eq!(items.len(), 1);
     }
 
     #[test]
