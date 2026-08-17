@@ -7,6 +7,46 @@ styloria is pre-1.0, so new features and breaking changes both land as
 minor-version bumps (`0.x.0`), per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [0.10.0] - 2026-08-17
+
+### Added
+
+- **`parse_declaration_list_from_values`** — read already-parsed component
+  values as a declaration list, returning the declarations and their
+  `SyntaxError`s ([#4](https://github.com/veripublica/styloria/issues/4)).
+
+  The twin of `parse_rule_list`, and needed for the same reason. A `{ … }`
+  block holds either rules or declarations; CSS Syntax Level 3 does not say
+  which, and only the caller knows. `parse_rule_list` already offered that
+  interpretation for component values — the declaration side accepted source
+  text only, which a caller holding a block no longer has. So the one
+  remaining way to read a block as declarations was to write the walk
+  yourself, and a consumer did: "is this a well-formed declaration" had ended
+  up outside the CSS crate purely because of that asymmetry.
+
+  Input is component values rather than text for the same reason
+  `parse_rule_list` takes them: **spans stay absolute**, so a caller can point
+  at a line and column in the original stylesheet rather than into a
+  re-tokenized fragment.
+
+  An empty chunk (`{;}`, `a;;b`) is not an error — §5.4.4 discards a stray
+  `<semicolon-token>`, so it is valid CSS and this stays silent about it.
+
+### Fixed
+
+- **A malformed declaration is one error, not one per token.** §5.4.2 says a
+  parse error in a declaration list discards component values up to the next
+  `<semicolon-token>` or EOF. The ident branch did that; the fallback branch
+  discarded a single component value and looped, so `1px: red` produced
+  `UnexpectedToken` twice and then `MalformedDeclaration` — three errors for
+  one broken declaration, which a consumer mapping every kind to one message
+  id reports three times. Recovery still resumes at the next declaration:
+  `1px: red; color: blue` is one error and one declaration.
+
+  Same shape as the selector fix in 0.9.1 (#3), arriving by a different
+  route. Both entry points are now asserted to agree over a set of inputs, so
+  the text-based and value-based paths cannot drift.
+
 ## [0.9.1] - 2026-08-17
 
 ### Fixed
