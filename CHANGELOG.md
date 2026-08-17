@@ -7,6 +7,36 @@ styloria is pre-1.0, so new features and breaking changes both land as
 minor-version bumps (`0.x.0`), per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [0.9.1] - 2026-08-17
+
+### Fixed
+
+- **A broken selector is reported once, not once per bad token**
+  ([#3](https://github.com/veripublica/styloria/issues/3)).
+  `validate_selector_list` pushed a `SyntaxError` for every component value it
+  could not accept, so a badly broken prelude became a pile rather than a
+  finding. A stylesheet beginning with a stray declaration is the shape that
+  exposed it: per CSS Syntax the whole of `text-indent:1.5em;\n@page` becomes
+  one qualified rule's prelude, and the walk blamed the `:`, the `1.5em`, the
+  `;` and the `@page` of the *next* rule — four errors for one mistake, the
+  last of them pointing at well-formed CSS.
+
+  The reporting unit is now the **comma-separated selector**, which is neither
+  of the two wrong answers. Per token is the pile above; per prelude would
+  lose the case that motivates the check at all, since
+  `. h-100, . y-100 { }` really is two independently broken selectors and a
+  caller fixing them needs both named. That case still reports two.
+
+  This is not "stop at the first error": each part is still walked in full,
+  because `validate_complex` recurses into attribute selectors and the walk is
+  what finds them. Only the reporting is capped, and a test pins the
+  difference — two malformed attribute selectors in two parts stay two errors.
+
+  No API change. Callers that count `SyntaxErrorKind::InvalidSelector` will
+  see fewer of them on malformed input and no change on valid input; measured
+  downstream against a 336-book corpus with epubcheck as the oracle, exactly
+  one book moves, from 4 findings to epubcheck's own 1.
+
 ## [0.9.0] - 2026-08-09
 
 ### Added
