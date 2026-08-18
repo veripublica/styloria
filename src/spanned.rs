@@ -328,10 +328,44 @@ fn declaration_list_from_values<'a>(
                 }
             }
             // An at-rule inside a declaration list (`@page { @top-center {…} }`)
-            // is handed back unexamined, exactly as `parse_rule_list` does with
-            // a nested at-rule: whether its body is declarations or rules is
-            // again the caller's question.
-            ComponentValue::Token(Token::AtKeyword(_)) => {}
+            // is handed back with its block unexamined, exactly as
+            // `parse_rule_list` does with a nested at-rule: whether that body
+            // is declarations or rules is again the caller's question.
+            //
+            // §5.4.2 consumes an at-rule here and appends it, so this is not a
+            // parse error under either policy — a caller that considers one
+            // *misplaced* (a nested at-rule in a style rule's block is CSS
+            // Nesting, which is not in the CSS Snapshot's official definition)
+            // is making a judgement about which CSS it accepts, not reading
+            // the syntax, and it needs the item in order to make it. Dropping
+            // it here left that caller unable to see the construct at all.
+            ComponentValue::Token(Token::AtKeyword(name)) => {
+                let mut prelude = Vec::new();
+                let mut block = None;
+                for v in chunk
+                    .iter()
+                    .skip_while(|v| !std::ptr::eq(*v, first))
+                    .skip(1)
+                {
+                    match &v.node {
+                        ComponentValue::Block(b) if b.kind == BlockKind::Curly => {
+                            block = Some(Spanned::new(b.clone(), v.span));
+                            break;
+                        }
+                        _ => prelude.push(v.clone()),
+                    }
+                }
+                let span = first.span.to(chunk.last().unwrap_or(first).span);
+                items.push(DeclarationListItem::AtRule(Spanned::new(
+                    AtRule {
+                        name: name.clone(),
+                        name_span: first.span,
+                        prelude,
+                        block,
+                    },
+                    span,
+                )));
+            }
             _ if nested == NestedRules::Ignored && ends_in_curly_block(chunk) => {}
             _ => {
                 errors.push(SyntaxError {
@@ -1163,6 +1197,14 @@ mod tests {
             "1px: red; color: blue",
             "color: red !important",
             "",
+            // At-rules. The value path used to drop these on the floor while
+            // the text path returned them, and no input above could see it:
+            // the count assertion below is what now holds the two together.
+            "@media print { color: blue }",
+            "color: red; @media print { color: blue }",
+            "@nest & b { color: blue }",
+            "@import \"x\"",
+            "color: red; @import \"x\"; width: 2px",
         ] {
             let (a_items, a_errs) = parse_declaration_list_with_errors(body);
             let css = format!("a {{{body}}}");
@@ -1172,10 +1214,14 @@ mod tests {
                 _ => panic!("expected a qualified rule"),
             };
             let (b_items, b_errs) = parse_declaration_list_from_values(&values);
+            let kind = |i: &DeclarationListItem| match i {
+                DeclarationListItem::Declaration(d) => format!("decl {}", d.node.name),
+                DeclarationListItem::AtRule(a) => format!("at {}", a.node.name),
+            };
             assert_eq!(
-                a_items.len(),
-                b_items.len(),
-                "declaration count differs for {body:?}"
+                a_items.iter().map(kind).collect::<Vec<_>>(),
+                b_items.iter().map(kind).collect::<Vec<_>>(),
+                "items differ for {body:?}"
             );
             let a: Vec<_> = a_errs.iter().map(|e| e.kind).collect();
             let b: Vec<_> = b_errs.iter().map(|e| e.kind).collect();

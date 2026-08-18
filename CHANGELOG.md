@@ -54,6 +54,23 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   `parse_stylesheet_with_errors` still reports about rules and says nothing
   about what is inside them. What moved here is **what** a block holds.
 
+### Fixed
+
+- **An at-rule in a declaration list is returned rather than dropped.**
+  `parse_declaration_list_from_values` skipped an `@…` chunk in silence while
+  the text-based `parse_declaration_list_with_errors` returned it as a
+  `DeclarationListItem::AtRule`. Neither is a parse error — §5.4.2 consumes
+  an at-rule in a declaration list quite happily — but a caller that wants to
+  judge whether one is *misplaced* (a nested at-rule in a style rule's block
+  is CSS Nesting, which the CSS Snapshot puts outside the official definition
+  of CSS) could not see the construct at all, and a validator built on this
+  had a false negative it could not have found from here.
+
+  The "both entry points agree" test could not see it either: its ten inputs
+  were all declarations. It now compares the returned items and not only the
+  error kinds, over at-rule inputs as well — checked by re-dropping them and
+  watching it fail.
+
 ### Changed
 
 - **The docs now say which entry point reports what.** `MalformedDeclaration`
