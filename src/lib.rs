@@ -19,7 +19,8 @@ pub use selector::{type_selector_names, validate_selector_list};
 pub use serialize::{serialize_declaration_list, serialize_stylesheet};
 pub use span::{Span, Spanned};
 pub use spanned::{
-    SyntaxError, SyntaxErrorKind, parse_declaration_list_from_values, parse_rule_list,
+    BlockContents, SyntaxError, SyntaxErrorKind, parse_at_rule_block,
+    parse_declaration_list_from_values, parse_rule_list,
 };
 pub use token::{NumericType, Token};
 pub use tokenizer::{SpannedTokens, Tokenizer};

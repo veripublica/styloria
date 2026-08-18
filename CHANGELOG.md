@@ -7,6 +7,63 @@ styloria is pre-1.0, so new features and breaking changes both land as
 minor-version bumps (`0.x.0`), per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [0.11.0] - 2026-08-18
+
+### Added
+
+- **`parse_at_rule_block`** — read an at-rule's `{ … }` block as whatever
+  that at-rule holds, returning `BlockContents::Declarations` or
+  `BlockContents::Rules` ([#4](https://github.com/veripublica/styloria/issues/4)).
+
+  0.10.0 gave a caller both readings of a block; it did not say **which** one
+  a given at-rule wants, so a consumer kept that table itself. That table is
+  a fact about CSS, not about the consumer, and the copy in epubveri was
+  incomplete in the way such a copy always becomes: it knew the
+  conditional-group rules and not `@keyframes`, so a keyframe block was read
+  as declarations and `0% { opacity: 0 }` came back as one malformed
+  declaration — an error on valid CSS, measured against epubcheck, which
+  reports nothing there. `@-webkit-keyframes`, `@starting-style` and any
+  unregistered at-rule holding rules failed the same way.
+
+  Three readings, and the middle one is why the table cannot live in a
+  caller's list of names:
+
+  - **Rules with selectors** — `@media`, `@supports`, `@container`,
+    `@layer`, `@scope`, `@document`, `@starting-style`. Preludes go through
+    `validate_selector_list` as before.
+  - **Rules whose preludes are not selectors** — `@keyframes`. A keyframe
+    selector (`from`, `to`, `0%`) is correct under CSS Animations 1 §3 and
+    malformed under Selectors 4, so simply adding `keyframes` to a grouping
+    list turns one invented error into two. Preludes come back unexamined;
+    this crate carries no keyframe-selector grammar, and inventing one would
+    be a restrictive check nobody asked for.
+  - **Declarations** — everything else, including at-rules this crate has
+    never heard of. There a chunk shaped like a nested rule is skipped in
+    silence rather than blamed, which is the direction the unknown case has
+    to fail in: CSS keeps gaining at-rules, so the table is permanently one
+    release behind the language, and its ignorance must not become an error
+    on a valid stylesheet. A malformed *declaration* is still reported —
+    that is malformed whatever the block turns out to hold.
+
+  A vendor prefix is stripped before the lookup, which is what carries
+  `@-webkit-keyframes` and `@-moz-document`.
+
+  This does not take back the deferral `parse_rule_list` and
+  `parse_declaration_list_from_values` were built on. **When** to descend
+  into a block is still entirely the caller's decision, and
+  `parse_stylesheet_with_errors` still reports about rules and says nothing
+  about what is inside them. What moved here is **what** a block holds.
+
+### Changed
+
+- **The docs now say which entry point reports what.** `MalformedDeclaration`
+  was documented as though it were a property of the CSS rather than of the
+  call you made — it cannot come from `parse_stylesheet_with_errors`, which
+  does not descend into blocks. That silence is what #4 was opened about, and
+  it cost a consumer a hand-rolled declaration walk. The `spanned` module
+  header now carries the table of which entry point to reach for given what
+  you hold.
+
 ## [0.10.0] - 2026-08-17
 
 ### Added

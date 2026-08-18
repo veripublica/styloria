@@ -14,6 +14,25 @@
 //! `Vec<Spanned<…>>`; a block's span covers its brackets, a rule's span
 //! covers its whole text, and a single-token value's span is the token's.
 //!
+//! # Reading a whole stylesheet
+//!
+//! Parsing stops at each `{ … }`: CSS Syntax Level 3 §5.4.2 leaves a block's
+//! contents uninterpreted, because what they mean depends on the construct
+//! that holds them. So every entry point here reports about the level it was
+//! asked to interpret and says nothing about the blocks below it, and a
+//! caller that wants the whole stylesheet descends one level per call:
+//!
+//! | you hold | ask for |
+//! |---|---|
+//! | source text | [`parse_stylesheet_with_errors`] |
+//! | a style rule's block | [`parse_declaration_list_from_values`] |
+//! | an at-rule's block | [`parse_at_rule_block`] (it knows which at-rules hold what) |
+//! | a `style="…"` value | [`parse_declaration_list_with_errors`] |
+//!
+//! **When** to descend stays the caller's decision; **what** a block holds is
+//! answered here, because that is a fact about CSS rather than about the
+//! caller (issue #4).
+//!
 //! ```
 //! let sheet = styloria::spanned::parse_stylesheet("body {\n  color: red;\n}");
 //! let rule = &sheet.rules[0];
@@ -55,12 +74,20 @@ pub enum SyntaxErrorKind {
     /// A `<bad-url-token>`: a malformed unquoted `url( … )`.
     BadUrl,
     /// A declaration whose name was not followed by `:` (§5.4.5) — discarded.
+    ///
+    /// Only ever comes from reading something *as a declaration list* — a
+    /// `style="…"` attribute, or a block handed to
+    /// [`parse_declaration_list_from_values`] or [`parse_at_rule_block`].
+    /// [`parse_stylesheet_with_errors`] does not descend into blocks, so it
+    /// never produces this.
     MalformedDeclaration,
     /// A qualified rule whose prelude reached EOF before its `{ … }` block.
     UnterminatedRule,
     /// A `{`, `[`, or `(` block that reached EOF before its closing bracket.
     UnterminatedBlock,
-    /// A token where a declaration or at-rule was expected (§5.4.2) — discarded.
+    /// A token where a declaration or at-rule was expected (§5.4.2) —
+    /// discarded. Entry-point-dependent in the same way as
+    /// [`MalformedDeclaration`](Self::MalformedDeclaration).
     UnexpectedToken,
     /// A `U+…` unicode-range with more than six hex digits in a run — more
     /// than any code point needs, so malformed under any reading.
@@ -157,10 +184,21 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet<'_> {
     parse_stylesheet_with_errors(input).0
 }
 
-/// Parse a stylesheet and also return every [`SyntaxError`] the parser
-/// recovered from, in source order. The tree is identical to
-/// [`parse_stylesheet`]'s; this variant just also hands back what was
+/// Parse a stylesheet and also return the [`SyntaxError`]s the parser
+/// recovered from *at the top level*, in source order. The tree is identical
+/// to [`parse_stylesheet`]'s; this variant also hands back what was
 /// discarded, for a tool that wants to report malformed CSS.
+///
+/// **It reports about rules, not about what is inside them.** A `{ … }`
+/// block comes back as raw component values, because CSS Syntax Level 3
+/// §5.4.2 leaves a block's meaning to whoever knows what kind of block it is
+/// — so `a { color red }` is clean here, and the malformed declaration
+/// inside it is found by reading the block:
+/// [`parse_at_rule_block`] for an at-rule, or
+/// [`parse_declaration_list_from_values`] for a style rule's. Each entry
+/// point reports about the thing it was asked to interpret and stays silent
+/// about the blocks below it; a caller wanting the whole stylesheet
+/// descends, one level per call.
 pub fn parse_stylesheet_with_errors(input: &str) -> (Stylesheet<'_>, Vec<SyntaxError>) {
     let mut p = SpannedParser {
         tokens: Tokenizer::new(input).spanned().peekable(),
@@ -229,6 +267,26 @@ pub fn parse_declaration_list_with_errors(
 pub fn parse_declaration_list_from_values<'a>(
     values: &[Spanned<ComponentValue<'a>>],
 ) -> (Vec<DeclarationListItem<'a>>, Vec<SyntaxError>) {
+    declaration_list_from_values(values, NestedRules::Rejected)
+}
+
+/// Whether a chunk shaped like a nested rule (`… { … }`) is a parse error.
+///
+/// It is, in the block of a *style rule*: that block holds declarations and
+/// nothing else, which is what [`parse_declaration_list_from_values`]
+/// exposes. It is not, in the block of an at-rule this crate has no table
+/// entry for — there the contents are genuinely unknown, so a nested rule is
+/// skipped rather than blamed. See [`parse_at_rule_block`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NestedRules {
+    Rejected,
+    Ignored,
+}
+
+fn declaration_list_from_values<'a>(
+    values: &[Spanned<ComponentValue<'a>>],
+    nested: NestedRules,
+) -> (Vec<DeclarationListItem<'a>>, Vec<SyntaxError>) {
     let mut items = Vec::new();
     let mut errors = Vec::new();
     for chunk in values.split(|v| matches!(&v.node, ComponentValue::Token(Token::Semicolon))) {
@@ -262,7 +320,7 @@ pub fn parse_declaration_list_from_values<'a>(
                         },
                         span,
                     )));
-                } else {
+                } else if !(nested == NestedRules::Ignored && ends_in_curly_block(chunk)) {
                     errors.push(SyntaxError {
                         span: first.span,
                         kind: SyntaxErrorKind::MalformedDeclaration,
@@ -274,6 +332,7 @@ pub fn parse_declaration_list_from_values<'a>(
             // a nested at-rule: whether its body is declarations or rules is
             // again the caller's question.
             ComponentValue::Token(Token::AtKeyword(_)) => {}
+            _ if nested == NestedRules::Ignored && ends_in_curly_block(chunk) => {}
             _ => {
                 errors.push(SyntaxError {
                     span: first.span,
@@ -283,6 +342,19 @@ pub fn parse_declaration_list_from_values<'a>(
         }
     }
     (items, errors)
+}
+
+/// Whether a declaration-list chunk is shaped like a rule rather than a
+/// declaration: its last meaningful component value is a `{ … }` block.
+///
+/// Asked only *after* reading it as a declaration has failed, so a value that
+/// legitimately ends in a block cannot be mistaken for a rule.
+fn ends_in_curly_block(chunk: &[Spanned<ComponentValue<'_>>]) -> bool {
+    chunk
+        .iter()
+        .rev()
+        .find(|v| !matches!(&v.node, ComponentValue::Token(Token::Whitespace)))
+        .is_some_and(|v| matches!(&v.node, ComponentValue::Block(b) if b.kind == BlockKind::Curly))
 }
 
 /// Read already-parsed component values as a **rule list**, returning the
@@ -312,6 +384,31 @@ pub fn parse_declaration_list_from_values<'a>(
 /// question, so a caller walking `@media` inside `@media` recurses itself.
 pub fn parse_rule_list<'a>(
     values: &[Spanned<ComponentValue<'a>>],
+) -> (Vec<Spanned<Rule<'a>>>, Vec<SyntaxError>) {
+    rule_list(values, Preludes::Selectors)
+}
+
+/// What a nested rule's prelude is, and so whether it is checked as a
+/// selector list.
+///
+/// In a conditional-group at-rule the children are style rules, so their
+/// preludes are selectors. In `@keyframes` they are *keyframe selectors* —
+/// `from`, `to`, `0%` — a different grammar entirely (CSS Animations 1 §3),
+/// under which `0%` is correct and would be a malformed selector. Reading
+/// one as the other invents an error on valid CSS, which is the whole reason
+/// this distinction is in the crate rather than in a caller's table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Preludes {
+    Selectors,
+    /// Handed back unexamined. This crate carries no keyframe-selector
+    /// grammar; nothing needs it yet, and inventing one would be a
+    /// restrictive check nobody asked for.
+    Opaque,
+}
+
+fn rule_list<'a>(
+    values: &[Spanned<ComponentValue<'a>>],
+    preludes: Preludes,
 ) -> (Vec<Spanned<Rule<'a>>>, Vec<SyntaxError>) {
     let mut rules = Vec::new();
     let mut errors = Vec::new();
@@ -357,7 +454,9 @@ pub fn parse_rule_list<'a>(
                     }
                     None => {
                         let prelude = std::mem::take(&mut prelude);
-                        errors.extend(crate::selector::validate_selector_list(&prelude));
+                        if preludes == Preludes::Selectors {
+                            errors.extend(crate::selector::validate_selector_list(&prelude));
+                        }
                         let span = prelude.first().map_or(v.span, |p| p.span).to(v.span);
                         rules.push(Spanned::new(
                             Rule::Qualified(QualifiedRule { prelude, block }),
@@ -390,6 +489,94 @@ pub fn parse_rule_list<'a>(
 
     errors.sort_by_key(|e| e.span.start);
     (rules, errors)
+}
+
+/// What an at-rule's `{ … }` block was read as, by
+/// [`parse_at_rule_block`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum BlockContents<'a> {
+    /// Declarations, and any nested at-rule, unexamined.
+    Declarations(Vec<DeclarationListItem<'a>>),
+    /// Nested rules — the block of a conditional-group at-rule, or of
+    /// `@keyframes`.
+    Rules(Vec<Spanned<Rule<'a>>>),
+}
+
+/// At-rules whose block holds *rules whose preludes are selectors*: the
+/// conditional-group rules of CSS Conditional 3 §3, plus `@scope` and
+/// `@starting-style`, whose children are likewise style rules.
+///
+/// A vendor prefix is stripped before the lookup, which is what carries
+/// `@-moz-document`.
+const RULE_BLOCKS: &[&str] = &[
+    "media",
+    "supports",
+    "container",
+    "layer",
+    "scope",
+    "document",
+    "starting-style",
+];
+
+/// At-rules whose block holds rules whose preludes are *not* selectors.
+/// `@-webkit-keyframes` and `@-moz-keyframes` arrive here prefix-stripped.
+const KEYFRAME_BLOCKS: &[&str] = &["keyframes"];
+
+/// Read an at-rule's `{ … }` block as whatever that at-rule holds.
+///
+/// A block holds either rules or declarations; CSS Syntax Level 3 §5.4.2
+/// deliberately does not say which, and defers to each at-rule's own
+/// specification. That deferral has to end somewhere, and this is the right
+/// place for it to end: *which* at-rule holds what is a fact about CSS, so a
+/// consumer that keeps its own table has taken on a copy of this crate's
+/// subject matter — and will keep a stale one, because CSS keeps growing.
+///
+/// This does not take the *other* decision back. When to descend into a
+/// block is still entirely the caller's: nothing here is reached from
+/// [`parse_stylesheet_with_errors`], which reports about rules and stays
+/// silent about what is inside them. The caller decides **when**; this
+/// answers **what**.
+///
+/// An at-rule with no table entry — unregistered, experimental, or simply
+/// newer than this crate — is read as declarations, and a chunk shaped like
+/// a nested rule inside it is skipped in silence rather than reported. That
+/// is the safe direction for the one case that is certain to recur: CSS
+/// gains an at-rule, this table has not heard of it, and a validator built
+/// on it must not start inventing errors on valid stylesheets. A malformed
+/// *declaration* in such a block is still reported, since that is malformed
+/// under any reading of the block.
+///
+/// `name` is the at-rule's name without the `@`, matched case-insensitively
+/// and with a leading `-vendor-` prefix removed.
+pub fn parse_at_rule_block<'a>(
+    name: &str,
+    values: &[Spanned<ComponentValue<'a>>],
+) -> (BlockContents<'a>, Vec<SyntaxError>) {
+    let bare = unprefixed(name);
+    if RULE_BLOCKS.iter().any(|r| bare.eq_ignore_ascii_case(r)) {
+        let (rules, errors) = rule_list(values, Preludes::Selectors);
+        (BlockContents::Rules(rules), errors)
+    } else if KEYFRAME_BLOCKS.iter().any(|r| bare.eq_ignore_ascii_case(r)) {
+        let (rules, errors) = rule_list(values, Preludes::Opaque);
+        (BlockContents::Rules(rules), errors)
+    } else {
+        let (items, errors) = declaration_list_from_values(values, NestedRules::Ignored);
+        (BlockContents::Declarations(items), errors)
+    }
+}
+
+/// Strip a leading vendor prefix (`-webkit-`, `-moz-`, `-ms-`, `-o-`, …):
+/// a `-`, a run of letters, a `-`. A name that is not prefixed comes back
+/// unchanged, including a custom `--name`, whose second character is `-`
+/// rather than a letter.
+fn unprefixed(name: &str) -> &str {
+    let Some(rest) = name.strip_prefix('-') else {
+        return name;
+    };
+    match rest.find('-') {
+        Some(i) if i > 0 && rest[..i].chars().all(|c| c.is_ascii_alphabetic()) => &rest[i + 1..],
+        _ => name,
+    }
 }
 
 struct SpannedParser<'a> {
@@ -1262,5 +1449,164 @@ mod rule_list_tests {
         );
         assert!(errors("@media print { p { color: red } ").is_empty());
         assert!(errors("@media print {  }").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod at_rule_block_tests {
+    use super::*;
+
+    /// The name and block of the first top-level at-rule.
+    fn at(css: &str) -> (String, Vec<Spanned<ComponentValue<'_>>>) {
+        match &parse_stylesheet(css).rules[0].node {
+            Rule::At(a) => (
+                a.name.to_string(),
+                a.block
+                    .as_ref()
+                    .expect("at-rule has a block")
+                    .node
+                    .values
+                    .clone(),
+            ),
+            Rule::Qualified(_) => panic!("expected an at-rule"),
+        }
+    }
+
+    fn read(css: &str) -> (BlockContents<'_>, Vec<SyntaxErrorKind>) {
+        let (name, values) = at(css);
+        let (contents, errors) = parse_at_rule_block(&name, &values);
+        (contents, errors.into_iter().map(|e| e.kind).collect())
+    }
+
+    fn is_rules(c: &BlockContents<'_>) -> bool {
+        matches!(c, BlockContents::Rules(_))
+    }
+
+    /// The case that sent this table into the crate. `@keyframes` holds
+    /// rules, and its preludes are keyframe selectors: `0%` is correct CSS
+    /// under CSS Animations 1 §3 and a malformed *selector* under Selectors
+    /// 4. A consumer whose table had only the conditional-group rules read
+    /// the block as declarations and reported the whole keyframe as one
+    /// malformed declaration — an error on valid CSS that epubcheck, the
+    /// reference implementation it was matching, does not report.
+    #[test]
+    fn a_keyframes_block_is_rules_with_unvalidated_preludes() {
+        for css in [
+            "@keyframes spin { 0% { opacity: 0 } 100% { opacity: 1 } }",
+            "@keyframes spin { from { opacity: 0 } to { opacity: 1 } }",
+            "@-webkit-keyframes spin { 50% { opacity: .5 } }",
+            "@-moz-keyframes spin { 50% { opacity: .5 } }",
+            "@keyframes spin { }",
+        ] {
+            let (contents, errors) = read(css);
+            assert!(is_rules(&contents), "{css} should read as rules");
+            assert!(errors.is_empty(), "{css} produced {errors:?}");
+        }
+    }
+
+    /// Reading the keyframe selector as a selector list is the failure the
+    /// `Preludes::Opaque` branch exists to prevent, so assert it directly:
+    /// the same values through `parse_rule_list` do produce the error.
+    #[test]
+    fn the_same_keyframes_block_is_two_bad_selectors_to_parse_rule_list() {
+        let (_, values) = at("@keyframes spin { 0% { opacity: 0 } 100% { opacity: 1 } }");
+        assert_eq!(
+            parse_rule_list(&values)
+                .1
+                .into_iter()
+                .map(|e| e.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                SyntaxErrorKind::InvalidSelector,
+                SyntaxErrorKind::InvalidSelector
+            ]
+        );
+    }
+
+    /// A conditional-group rule keeps the selector check it gained in #2 —
+    /// the point of the table is that the two blocks differ.
+    #[test]
+    fn a_grouping_block_is_rules_with_selectors_validated() {
+        for css in [
+            "@media print { .. { color: red } }",
+            "@starting-style { .. { opacity: 0 } }",
+        ] {
+            let (contents, errors) = read(css);
+            assert!(is_rules(&contents), "{css} should read as rules");
+            assert_eq!(errors, vec![SyntaxErrorKind::InvalidSelector], "{css}");
+        }
+        assert!(read("@media print { p { color: red } }").1.is_empty());
+        assert!(read("@starting-style { .a { opacity: 0 } }").1.is_empty());
+    }
+
+    #[test]
+    fn a_declaration_at_rule_is_declarations() {
+        for css in [
+            "@font-face { font-family: X; src: url(x.ttf) }",
+            "@page { margin: 1em }",
+            "@counter-style thumbs { system: cyclic; symbols: \"x\" }",
+            "@property --x { syntax: \"<length>\"; inherits: false }",
+        ] {
+            let (contents, errors) = read(css);
+            assert!(matches!(contents, BlockContents::Declarations(_)), "{css}");
+            assert!(errors.is_empty(), "{css} produced {errors:?}");
+        }
+        assert_eq!(
+            read("@font-face { font-family: X; src url(x.ttf) }").1,
+            vec![SyntaxErrorKind::MalformedDeclaration]
+        );
+    }
+
+    /// The direction an unknown at-rule has to fail in. CSS keeps gaining
+    /// at-rules, so this table is permanently one release behind the
+    /// language; what it must not do is turn its own ignorance into an
+    /// error on a valid stylesheet. A malformed declaration inside is still
+    /// reported — that is malformed whatever the block turns out to hold.
+    #[test]
+    fn an_unknown_at_rule_reports_a_bad_declaration_and_not_a_nested_rule() {
+        assert!(read("@future { p { color: red } }").1.is_empty());
+        assert!(
+            read("@future (cond) { .a b, .c { color: red } }")
+                .1
+                .is_empty()
+        );
+        assert_eq!(
+            read("@future { color red }").1,
+            vec![SyntaxErrorKind::MalformedDeclaration]
+        );
+        assert_eq!(
+            read("@future { p { color: red } color red }").1,
+            vec![SyntaxErrorKind::MalformedDeclaration]
+        );
+    }
+
+    /// The tolerance above is scoped to at-rule blocks. A *style rule's*
+    /// block holds declarations and nothing else, and the entry point for
+    /// it still says so.
+    #[test]
+    fn a_style_rules_block_still_rejects_a_nested_rule() {
+        let sheet = parse_stylesheet("a { color: red; & b { color: blue } }");
+        let Rule::Qualified(q) = &sheet.rules[0].node else {
+            panic!("expected a qualified rule")
+        };
+        assert_eq!(
+            parse_declaration_list_from_values(&q.block.node.values)
+                .1
+                .into_iter()
+                .map(|e| e.kind)
+                .collect::<Vec<_>>(),
+            vec![SyntaxErrorKind::UnexpectedToken]
+        );
+    }
+
+    #[test]
+    fn a_vendor_prefix_is_stripped_and_a_custom_name_is_not() {
+        assert_eq!(unprefixed("-webkit-keyframes"), "keyframes");
+        assert_eq!(unprefixed("-moz-document"), "document");
+        assert_eq!(unprefixed("-ms-viewport"), "viewport");
+        assert_eq!(unprefixed("keyframes"), "keyframes");
+        assert_eq!(unprefixed("--custom"), "--custom");
+        assert_eq!(unprefixed("-"), "-");
+        assert_eq!(unprefixed("-9-keyframes"), "-9-keyframes");
     }
 }
