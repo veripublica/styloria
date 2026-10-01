@@ -6,6 +6,10 @@ on:
   pull_request:
 
 # Cancel superseded runs on the same ref (e.g. rapid pushes to a PR).
+# Read-only token: CI builds and tests, it never writes to the repo.
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -15,7 +19,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
 
       # ubuntu-latest ships stable Rust + rustfmt/clippy; only the wasm target
       # has to be added, for the smoke build below.
