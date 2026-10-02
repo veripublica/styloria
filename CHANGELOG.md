@@ -7,7 +7,7 @@ styloria is pre-1.0, so new features and breaking changes both land as
 minor-version bumps (`0.x.0`), per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
-## [Unreleased]
+## [0.12.0] - 2026-10-02
 
 CSS Syntax Level 3 as of the **1 October 2026 Candidate Recommendation
 Draft**, and one parse tree instead of two. This is a breaking release: the
