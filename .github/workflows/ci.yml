@@ -47,3 +47,43 @@ jobs:
       # on the commit that causes it, not two repos later.
       - name: Build for wasm32
         run: cargo build --lib --target wasm32-unknown-unknown
+
+  # **The published MSRV, actually tested.** `rust-version` in Cargo.toml is a
+  # promise on crates.io: cargo refuses to resolve a dependency that needs
+  # more, and a user on an older toolchain reads it as "this will build".
+  # styloria sits under epubveri (and epubsana under that), so a silent rise
+  # here raises the floor of both consumers too.
+  #
+  # The version is read out of Cargo.toml rather than written here: a
+  # hard-coded number would be a second declaration free to drift from the
+  # first. Raise `rust-version` and the next push tests the new floor.
+  #
+  # `check` rather than `test`: the promise is that the crate compiles on that
+  # toolchain, not that our test harness does. No `--locked`, as above.
+  # Copied from epubveri's `msrv` job.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Read the declared MSRV
+        id: msrv
+        run: |
+          v=$(grep -m1 '^rust-version' Cargo.toml | cut -d'"' -f2)
+          test -n "$v" || { echo "no rust-version in Cargo.toml"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "declared MSRV: $v"
+
+      - name: Install it
+        env:
+          MSRV: ${{ steps.msrv.outputs.version }}
+        run: |
+          rustup toolchain install "$MSRV" --profile minimal
+          rustup default "$MSRV"
+          rustc -V
+
+      - name: Compile at the floor
+        run: cargo check --lib
