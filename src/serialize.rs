@@ -1,15 +1,16 @@
 //! Serialization back to CSS text (CSS Syntax Level 3, "Serialization":
-//! <https://www.w3.org/TR/css-syntax-3/#serialization>).
+//! <https://www.w3.org/TR/2026/CRD-css-syntax-3-20261001/#serialization>).
 //!
-//! The acceptance bar for this increment is round-tripping to *equivalent*
-//! CSS, not byte-identical output: whitespace/comments aren't preserved
+//! The acceptance bar is round-tripping to *equivalent* CSS, not
+//! byte-identical output: whitespace/comments aren't preserved
 //! (tokenization discards them), but escaping must always be correct — a
 //! serialized identifier/string/url must always re-tokenize to the same
 //! value it started from.
 
 use crate::parser::{
-    ComponentValue, Declaration, DeclarationListItem, Rule, SimpleBlock, Stylesheet,
+    BlockItem, BlockKind, ComponentValue, Declaration, Rule, SimpleBlock, Stylesheet,
 };
+use crate::span::Spanned;
 use crate::token::Token;
 use crate::tokenizer::is_name;
 
@@ -18,9 +19,8 @@ fn needs_control_escape(c: char) -> bool {
 }
 
 fn escape_code_point(c: char, out: &mut String) {
-    out.push('\\');
-    out.push_str(&format!("{:x}", c as u32));
-    out.push(' ');
+    use std::fmt::Write;
+    let _ = write!(out, "\\{:x} ", c as u32);
 }
 
 /// Serialize a "name" body (an identifier's or hash's textual content),
@@ -34,27 +34,33 @@ fn escape_code_point(c: char, out: &mut String) {
 // independent parts of the serialization spec that happen to share an action.
 #[allow(clippy::if_same_then_else)]
 fn serialize_name(s: &str, out: &mut String, check_leading_digit: bool) {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() == 1 && chars[0] == '-' {
-        out.push('\\');
-        out.push('-');
+    if s == "-" {
+        out.push_str("\\-");
         return;
     }
-    for (i, &c) in chars.iter().enumerate() {
+    let starts_with_dash = s.starts_with('-');
+    for (i, c) in s.chars().enumerate() {
         if c == '\0' {
             out.push('\u{FFFD}');
         } else if needs_control_escape(c) {
             escape_code_point(c, out);
         } else if check_leading_digit
             && c.is_ascii_digit()
-            && (i == 0 || (i == 1 && chars[0] == '-'))
+            && (i == 0 || (i == 1 && starts_with_dash))
         {
             escape_code_point(c, out);
         } else if is_name(c) {
             out.push(c);
-        } else {
+        } else if c.is_ascii() {
             out.push('\\');
             out.push(c);
+        } else {
+            // A non-ASCII code point that is not an ident code point (a
+            // no-break space, say) has to be escaped by value: `\` followed
+            // by the character itself would read back as a valid escape too,
+            // but only if the character is not a newline or hex digit, and
+            // writing it as hex sidesteps both.
+            escape_code_point(c, out);
         }
     }
 }
@@ -89,8 +95,7 @@ pub fn serialize_url(s: &str, out: &mut String) {
         match c {
             '\0' => out.push('\u{FFFD}'),
             '"' | '\'' | '(' | ')' | '\\' | ' ' | '\t' | '\n' | '\r' | '\x0c' => {
-                out.push('\\');
-                out.push(c);
+                escape_code_point(c, out);
             }
             c if needs_control_escape(c) => escape_code_point(c, out),
             c => out.push(c),
@@ -110,8 +115,7 @@ fn serialize_dimension_unit(unit: &str, out: &mut String) {
         && matches!(chars.clone().next(), Some(c) if c.is_ascii_digit() || c == '+' || c == '-')
     {
         escape_code_point(first, out);
-        let rest: String = chars.collect();
-        serialize_name(&rest, out, false);
+        serialize_name(chars.as_str(), out, false);
         return;
     }
     serialize_name(unit, out, false);
@@ -133,9 +137,17 @@ pub fn serialize_token(t: &Token, out: &mut String) {
             serialize_name(value, out, *is_id);
         }
         Token::String(s) => serialize_string(s, out),
-        Token::BadString => out.push('"'),
+        // An unterminated string: a quote and the newline that ended it,
+        // which re-tokenizes as a bad string again rather than swallowing
+        // the text after it.
+        Token::BadString => out.push_str("\"\n"),
         Token::Url(s) => serialize_url(s, out),
-        Token::BadUrl => out.push_str("url()"),
+        Token::BadUrl(raw) => {
+            out.push_str(raw);
+            if !raw.ends_with(')') {
+                out.push(')');
+            }
+        }
         Token::Delim(c) => out.push(*c),
         Token::Number { repr, .. } => out.push_str(repr),
         Token::Percentage { repr, .. } => {
@@ -145,6 +157,13 @@ pub fn serialize_token(t: &Token, out: &mut String) {
         Token::Dimension { repr, unit, .. } => {
             out.push_str(repr);
             serialize_dimension_unit(unit, out);
+        }
+        Token::UnicodeRange { start, end } => {
+            use std::fmt::Write;
+            let _ = write!(out, "U+{start:X}");
+            if end != start {
+                let _ = write!(out, "-{end:X}");
+            }
         }
         Token::Whitespace => out.push(' '),
         Token::Cdo => out.push_str("<!--"),
@@ -167,89 +186,92 @@ pub fn serialize_component_value(v: &ComponentValue, out: &mut String) {
         ComponentValue::Function { name, args } => {
             serialize_ident(name, out);
             out.push('(');
-            for a in args {
-                serialize_component_value(a, out);
-            }
+            serialize_values(args, out);
             out.push(')');
         }
         ComponentValue::Block(b) => serialize_simple_block(b, out),
     }
 }
 
+/// A list of component values: a prelude, a declaration's value, a block's
+/// or function's contents.
+pub fn serialize_values(values: &[Spanned<ComponentValue>], out: &mut String) {
+    for v in values {
+        serialize_component_value(&v.node, out);
+    }
+}
+
 pub fn serialize_simple_block(b: &SimpleBlock, out: &mut String) {
     let (open, close) = match b.kind {
-        crate::parser::BlockKind::Curly => ('{', '}'),
-        crate::parser::BlockKind::Square => ('[', ']'),
-        crate::parser::BlockKind::Paren => ('(', ')'),
+        BlockKind::Curly => ('{', '}'),
+        BlockKind::Square => ('[', ']'),
+        BlockKind::Paren => ('(', ')'),
     };
     out.push(open);
-    for v in &b.values {
-        serialize_component_value(v, out);
-    }
+    serialize_values(&b.values, out);
     out.push(close);
 }
 
 pub fn serialize_declaration(d: &Declaration, out: &mut String) {
     serialize_ident(&d.name, out);
     out.push(':');
-    for v in &d.value {
-        serialize_component_value(v, out);
-    }
+    serialize_values(&d.value, out);
     if d.important {
         out.push_str("!important");
     }
 }
 
-fn serialize_prelude(prelude: &[ComponentValue], out: &mut String) {
-    for v in prelude {
-        serialize_component_value(v, out);
+fn serialize_items(items: &[BlockItem], out: &mut String) {
+    for item in items {
+        match item {
+            BlockItem::Declaration(d) => {
+                serialize_declaration(&d.node, out);
+                out.push(';');
+            }
+            BlockItem::Rule(r) => serialize_rule(&r.node, out),
+        }
     }
 }
 
 pub fn serialize_rule(r: &Rule, out: &mut String) {
     match r {
-        Rule::Qualified(q) => {
-            serialize_prelude(&q.prelude, out);
-            serialize_simple_block(&q.block, out);
-        }
+        Rule::Qualified(q) => serialize_values(&q.prelude, out),
         Rule::At(a) => {
             out.push('@');
             serialize_ident(&a.name, out);
-            serialize_prelude(&a.prelude, out);
-            match &a.block {
-                Some(b) => serialize_simple_block(b, out),
-                None => out.push(';'),
-            }
+            serialize_values(&a.prelude, out);
         }
+    }
+    match r.block() {
+        Some(b) => {
+            out.push('{');
+            serialize_items(&b.node, out);
+            out.push('}');
+        }
+        None => out.push(';'),
     }
 }
 
 pub fn serialize_stylesheet(sheet: &Stylesheet) -> String {
     let mut out = String::new();
     for r in &sheet.rules {
-        serialize_rule(r, &mut out);
+        serialize_rule(&r.node, &mut out);
     }
     out
 }
 
-pub fn serialize_declaration_list(items: &[DeclarationListItem]) -> String {
+/// The contents of a block, as [`parse_block_contents`](crate::parse_block_contents)
+/// returns them — a `style="…"` attribute's value, say.
+pub fn serialize_block_contents(items: &[BlockItem]) -> String {
     let mut out = String::new();
-    for (i, item) in items.iter().enumerate() {
-        if i > 0 {
-            out.push(';');
-        }
-        match item {
-            DeclarationListItem::Declaration(d) => serialize_declaration(d, &mut out),
-            DeclarationListItem::AtRule(a) => serialize_rule(&Rule::At(a.clone()), &mut out),
-        }
-    }
+    serialize_items(items, &mut out);
     out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::Parser;
+    use crate::parser::{parse_block_contents, parse_stylesheet};
     use crate::tokenizer::Tokenizer;
 
     #[test]
@@ -276,11 +298,29 @@ mod tests {
     }
 
     #[test]
+    fn ident_roundtrip_non_ident_code_points() {
+        for s in ["a\u{A0}b", "a b", "a:b", "x\u{D7}", "ç\u{2000}"] {
+            let mut out = String::new();
+            serialize_ident(s, &mut out);
+            let toks: Vec<_> = Tokenizer::new(&out).collect();
+            assert_eq!(toks, vec![Token::Ident(s.into())], "{s:?} → {out:?}");
+        }
+    }
+
+    #[test]
     fn string_roundtrip_with_quote_and_backslash() {
         let mut out = String::new();
         serialize_string("a\"b\\c", &mut out);
         let toks: Vec<_> = Tokenizer::new(&out).collect();
         assert_eq!(toks, vec![Token::String("a\"b\\c".into())]);
+    }
+
+    #[test]
+    fn url_roundtrip_with_specials() {
+        let mut out = String::new();
+        serialize_url("a b(c)'d\"e\\f", &mut out);
+        let toks: Vec<_> = Tokenizer::new(&out).collect();
+        assert_eq!(toks, vec![Token::Url("a b(c)'d\"e\\f".into())], "{out}");
     }
 
     #[test]
@@ -299,33 +339,54 @@ mod tests {
         }
     }
 
+    /// Serializing, parsing and serializing again is a fixed point: the
+    /// second parse saw the same structure as the first. (Trees can't be
+    /// compared directly, since every span moves.)
+    fn assert_stable(css: &str) {
+        let (sheet, _) = parse_stylesheet(css);
+        let once = serialize_stylesheet(&sheet);
+        let (again, _) = parse_stylesheet(&once);
+        let twice = serialize_stylesheet(&again);
+        assert_eq!(once, twice, "not stable for {css:?}");
+    }
+
     #[test]
     fn stylesheet_roundtrip() {
-        let css = r#"
+        assert_stable(
+            r#"
             @media screen and (min-width: 10px) {
                 a.foo::before { content: "he said \"hi\""; color: red !important; }
             }
-            --custom: { a b c };
-            p { margin: 0 auto; }
-        "#;
-        let sheet = Parser::parse_stylesheet(css);
-        let out = serialize_stylesheet(&sheet);
-        let sheet2 = Parser::parse_stylesheet(&out);
+            p { margin: 0 auto; --x: { a b c }; }
+            @import url(x.css);
+            "#,
+        );
+        assert_stable("p { color: red; a:hover { color: blue } & b { c: d } }");
+        assert_stable("@font-face { unicode-range: U+0-7F, U+4??; src: url(a b) }");
+        assert_stable("a { b: \"c\nd: e }");
+        assert_stable("@page { margin: 1cm; @top-center { content: \"x\" } }");
+    }
+
+    #[test]
+    fn serialized_text_is_what_the_tree_says() {
+        let (sheet, _) =
+            parse_stylesheet("p{color:red;a{color:blue}--x:{y};margin:0!important}@import 'a';");
         assert_eq!(
-            sheet, sheet2,
-            "round-tripped stylesheet parsed differently:\n{out}"
+            serialize_stylesheet(&sheet),
+            "p{color:red;a{color:blue;}--x:{y};margin:0!important;}@import \"a\";"
         );
     }
 
     #[test]
-    fn declaration_list_roundtrip() {
+    fn block_contents_roundtrip() {
         let css = "color: red; --x: 1px solid blue; margin:0 10px !important";
-        let items = Parser::parse_declaration_list(css);
-        let out = serialize_declaration_list(&items);
-        let items2 = Parser::parse_declaration_list(&out);
+        let (items, _) = parse_block_contents(css);
+        let once = serialize_block_contents(&items);
+        let (items2, _) = parse_block_contents(&once);
+        assert_eq!(once, serialize_block_contents(&items2));
         assert_eq!(
-            items, items2,
-            "round-tripped declaration list parsed differently:\n{out}"
+            once,
+            "color:red;--x:1px solid blue;margin:0 10px!important;"
         );
     }
 }

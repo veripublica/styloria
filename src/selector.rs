@@ -29,8 +29,8 @@
 //!    accepted** — `&` nesting, `::part()`, a pseudo name nobody has heard
 //!    of. Only shapes that no version of Selectors can produce are reported.
 
+use crate::parser::{ComponentValue, SyntaxError, SyntaxErrorKind};
 use crate::span::{Span, Spanned};
-use crate::spanned::{ComponentValue, SyntaxError, SyntaxErrorKind};
 use crate::token::Token;
 
 /// Report every place a qualified rule's prelude fails to be a selector
@@ -52,12 +52,26 @@ use crate::token::Token;
 /// still walked in full, because `validate_complex` recurses into attribute
 /// selectors and the walk is what finds them; only the *reporting* is capped.
 pub fn validate_selector_list(prelude: &[Spanned<ComponentValue<'_>>]) -> Vec<SyntaxError> {
+    validate_list(prelude, false)
+}
+
+/// [`validate_selector_list`] for a **relative** selector list (Selectors
+/// Level 4 §3.6): the prelude of a style rule nested in another style rule
+/// (CSS Nesting §2.1), where each selector may begin with a combinator —
+/// `p { > a { … } + b { … } }`.
+pub fn validate_relative_selector_list(
+    prelude: &[Spanned<ComponentValue<'_>>],
+) -> Vec<SyntaxError> {
+    validate_list(prelude, true)
+}
+
+fn validate_list(prelude: &[Spanned<ComponentValue<'_>>], relative: bool) -> Vec<SyntaxError> {
     let mut errors = Vec::new();
     // A prelude splits on top-level commas into complex selectors. An empty
     // side (`, p`, `a,`, `a,,b`) is the one comma error worth reporting.
     for part in split_on_commas(prelude, &mut errors) {
         let mut part_errors = Vec::new();
-        validate_complex(part, &mut part_errors);
+        validate_complex(part, relative, &mut part_errors);
         // The earliest one: it is where the author has to start reading, and
         // everything after it is usually this parser losing its footing
         // rather than a second independent mistake.
@@ -179,10 +193,18 @@ fn split_on_commas<'p, 'a>(
 
 /// A complex selector: compounds joined by combinators. Reports a combinator
 /// with nothing on one side (`> p`, `a >`, `a > > b`).
-fn validate_complex(part: &[Spanned<ComponentValue<'_>>], errors: &mut Vec<SyntaxError>) {
+///
+/// In a relative selector the first thing may be a combinator, which then has
+/// the nesting parent on its left; it still needs a compound on its right.
+fn validate_complex(
+    part: &[Spanned<ComponentValue<'_>>],
+    relative: bool,
+    errors: &mut Vec<SyntaxError>,
+) {
     let mut expect_compound = true;
     let mut i = 0;
     let mut saw_any = false;
+    let mut leading = None;
     while i < part.len() {
         let cv = &part[i];
         if is_whitespace(&cv.node) {
@@ -190,7 +212,9 @@ fn validate_complex(part: &[Spanned<ComponentValue<'_>>], errors: &mut Vec<Synta
             continue;
         }
         if let Some(_c) = as_combinator(&cv.node) {
-            if expect_compound {
+            if relative && !saw_any && leading.is_none() {
+                leading = Some(cv.span);
+            } else if expect_compound {
                 // Nothing to combine with on the left: a leading combinator,
                 // or two in a row.
                 errors.push(SyntaxError {
@@ -211,6 +235,15 @@ fn validate_complex(part: &[Spanned<ComponentValue<'_>>], errors: &mut Vec<Synta
         saw_any = true;
     }
     // A trailing combinator has nothing on its right.
+    if expect_compound
+        && !saw_any
+        && let Some(span) = leading
+    {
+        errors.push(SyntaxError {
+            span,
+            kind: SyntaxErrorKind::InvalidSelector,
+        });
+    }
     if expect_compound
         && saw_any
         && let Some(last) = part.iter().rev().find(|cv| !is_whitespace(&cv.node))
@@ -475,7 +508,7 @@ fn as_combinator(cv: &ComponentValue<'_>) -> Option<char> {
 
 #[cfg(test)]
 mod tests {
-    use crate::spanned::{SyntaxErrorKind, syntax_errors};
+    use crate::parser::{SyntaxErrorKind, syntax_errors};
 
     /// Every selector error the module reports, for one stylesheet.
     fn sel_errors(css: &str) -> usize {
@@ -490,10 +523,10 @@ mod tests {
     /// selectors newer than this parser: the rule is that anything we don't
     /// understand is *accepted*, not reported.
     fn type_names(css: &str) -> Vec<String> {
-        let sheet = crate::spanned::parse_stylesheet(css);
+        let (sheet, _) = crate::parse_stylesheet(css);
         let mut out = Vec::new();
         for rule in &sheet.rules {
-            if let crate::spanned::Rule::Qualified(q) = &rule.node {
+            if let crate::Rule::Qualified(q) = &rule.node {
                 out.extend(
                     super::type_selector_names(&q.prelude)
                         .into_iter()
@@ -631,7 +664,7 @@ mod tests {
     fn a_leading_bom_is_not_part_of_the_first_selector() {
         let css = "\u{FEFF}@charset \"iso-8859-15\";\n.hello { color: red }";
         assert_eq!(sel_errors(css), 0, "a BOM must not produce selector errors");
-        let sheet = crate::spanned::parse_stylesheet(css);
+        let (sheet, _) = crate::parse_stylesheet(css);
         assert_eq!(sheet.rules.len(), 2, "@charset and .hello are two rules");
     }
 
@@ -639,7 +672,7 @@ mod tests {
     /// the parser stays error-recovering, as it is everywhere else.
     #[test]
     fn a_bad_selector_does_not_swallow_the_stylesheet() {
-        let sheet = crate::spanned::parse_stylesheet("> bad { color: red } p { color: blue }");
+        let (sheet, _) = crate::parse_stylesheet("> bad { color: red } p { color: blue }");
         assert_eq!(sheet.rules.len(), 2, "both rules still parse");
     }
 

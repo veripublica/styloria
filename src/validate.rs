@@ -1,6 +1,6 @@
 //! Semantic validation on top of the property-agnostic parser.
 //!
-//! The parser ([`crate::spanned`]) is deliberately property-blind: it will
+//! The parser ([`crate::parser`]) is deliberately property-blind: it will
 //! happily build a declaration named `font-eight`, because *syntactically*
 //! it is a perfectly good declaration. This layer adds the vocabulary — it
 //! knows which property names CSS actually defines — and reports the ones it
@@ -9,21 +9,23 @@
 //!
 //! # Scope
 //!
-//! Declarations in qualified rules (`selector { … }`) are checked against the
-//! set of CSS properties, including qualified rules nested inside **conditional
-//! group rules** — `@media`, `@supports`, `@container`, `@layer { … }`,
-//! `@scope` — which hold a rule list.
+//! Declarations in style rules (`selector { … }`) are checked against the set
+//! of CSS properties, at any depth: inside conditional group rules (`@media`,
+//! `@supports`, `@container`, `@layer`, `@scope`, …), nested in other style
+//! rules, and in `@keyframes` blocks. A declaration directly inside a
+//! conditional group rule is a property too (CSS Nesting's nested
+//! declarations), and is checked as one.
 //!
 //! **Descriptor at-rules** are checked too, each against its own vocabulary:
 //! `@font-face`, `@counter-style`, `@property`, `@font-palette-values`,
 //! `@view-transition`. `@page` is special — it mixes its page descriptors with
-//! ordinary properties, so it is checked against the union of both. At-rules
-//! whose body is not a descriptor list (`@keyframes`, `@font-feature-values`,
-//! …) are left alone.
+//! ordinary properties, so it is checked against the union of both. An
+//! at-rule this crate has no vocabulary for (`@font-feature-values`, an
+//! unknown or newer one) is left alone, and so is everything inside it.
 //!
-//! For a bare list of declarations — the contents of an inline `style="…"`
-//! attribute — use [`validate_declaration_list`], which checks against the
-//! property vocabulary.
+//! For the contents of an inline `style="…"` attribute use
+//! [`validate_declaration_list`], which checks against the property
+//! vocabulary.
 //!
 //! The guiding rule is asymmetric on purpose: **failing to flag an unknown
 //! name is safe; flagging a real one is not.** So every exemption below errs
@@ -31,9 +33,8 @@
 
 use crate::descriptors::descriptors_for;
 use crate::known_properties::KNOWN_PROPERTIES;
+use crate::parser::{self, BlockItem, Rule, Stylesheet};
 use crate::span::{Span, Spanned};
-use crate::spanned::{self, ComponentValue, DeclarationListItem, Rule, SimpleBlock};
-use crate::token::Token;
 
 /// One validation finding, located by the source [`Span`] it concerns.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,149 +74,65 @@ enum Vocab {
 }
 
 /// Validate a stylesheet's declarations, returning every finding in source
-/// order. Parses `css` with [`spanned::parse_stylesheet`] and checks each
-/// declaration in a qualified rule, descending into conditional group
-/// at-rules (see the module docs for scope).
+/// order. Parses `css` with [`parse_stylesheet`](crate::parse_stylesheet);
+/// a caller that already holds the tree uses [`validate_parsed_stylesheet`]
+/// instead and saves the second parse.
 pub fn validate_stylesheet(css: &str) -> Vec<Diagnostic> {
-    let sheet = spanned::parse_stylesheet(css);
+    validate_parsed_stylesheet(&parser::parse_stylesheet(css).0)
+}
+
+/// [`validate_stylesheet`] over a tree that is already parsed.
+pub fn validate_parsed_stylesheet(sheet: &Stylesheet<'_>) -> Vec<Diagnostic> {
     let mut out = Vec::new();
-    validate_rules(&sheet.rules, css, &mut out);
+    for rule in &sheet.rules {
+        check_rule(rule, &mut out);
+    }
     out
 }
 
-/// Validate a bare list of declarations — the contents of an inline
-/// `style="…"` attribute — against the CSS property vocabulary. Each
-/// declaration's name span locates a finding, indexing directly into `css`.
-///
-/// A style attribute holds only declarations (no selectors, no rules); any
-/// stray at-rule in the input is ignored, as it carries no property.
+/// Validate the contents of an inline `style="…"` attribute — read with
+/// [`parse_block_contents`](crate::parse_block_contents) — against the CSS
+/// property vocabulary. Each finding's span indexes directly into `css`.
 pub fn validate_declaration_list(css: &str) -> Vec<Diagnostic> {
+    validate_parsed_block(&parser::parse_block_contents(css).0)
+}
+
+/// [`validate_declaration_list`] over block items that are already parsed.
+pub fn validate_parsed_block(items: &[BlockItem<'_>]) -> Vec<Diagnostic> {
     let mut out = Vec::new();
-    for item in spanned::parse_declaration_list(css) {
-        if let DeclarationListItem::Declaration(d) = item {
-            check_name(&d.node.name, d.node.name_span, &Vocab::Property, &mut out);
-        }
-    }
+    check_items(items, &Vocab::Property, &mut out);
     out
 }
 
-/// Check every qualified rule in `rules`, descending into conditional group
-/// at-rules. `css` is the source the rules' spans index into.
-fn validate_rules(rules: &[Spanned<Rule<'_>>], css: &str, out: &mut Vec<Diagnostic>) {
-    for rule in rules {
-        match &rule.node {
-            Rule::Qualified(q) => check_block(&q.block.node, &Vocab::Property, out),
-            Rule::At(at) if is_conditional_group(&at.name) => {
-                if let Some(block) = &at.block {
-                    validate_group_body(&block.node, css, out);
-                }
+fn check_rule(rule: &Spanned<Rule<'_>>, out: &mut Vec<Diagnostic>) {
+    match &rule.node {
+        Rule::Qualified(q) => check_items(&q.block.node, &Vocab::Property, out),
+        Rule::At(at) => {
+            let Some(block) = &at.block else { return };
+            let bare = parser::unprefixed(&at.name).to_ascii_lowercase();
+            if let Some((at_rule, names)) = descriptors_for(&bare) {
+                // A descriptor at-rule (@font-face, @counter-style, …): its
+                // declarations against that at-rule's own vocabulary.
+                let vocab = Vocab::Descriptor {
+                    at_rule,
+                    names,
+                    allow_properties: at_rule == "page",
+                };
+                check_items(&block.node, &vocab, out);
+            } else if parser::holds_style_rules(&bare) || bare == "keyframes" {
+                check_items(&block.node, &Vocab::Property, out);
             }
-            Rule::At(at) => {
-                // A descriptor at-rule (@font-face, @counter-style, …): check
-                // its declarations against that at-rule's own vocabulary.
-                let lname = at.name.to_ascii_lowercase();
-                if let (Some((at_rule, names)), Some(block)) = (descriptors_for(&lname), &at.block)
-                {
-                    let vocab = Vocab::Descriptor {
-                        at_rule,
-                        names,
-                        allow_properties: at_rule == "page",
-                    };
-                    check_block(&block.node, &vocab, out);
-                }
-                // Any other at-rule body is not a descriptor list — left alone.
-            }
+            // Any other at-rule's body means something this crate does not
+            // know — left alone.
         }
     }
 }
 
-/// True for at-rules whose body is a list of *rules* (which may contain
-/// qualified rules with declarations), as opposed to descriptors. Names are
-/// ASCII case-insensitive.
-fn is_conditional_group(name: &str) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "media" | "supports" | "container" | "layer" | "scope"
-    )
-}
-
-/// A conditional group rule's body is itself a rule list. Re-parse that inner
-/// text with the full parser — so nested `@media`, `@supports` conditions,
-/// and a `@font-face` sitting inside are all handled exactly as at top level —
-/// then remap the sub-parse's spans back onto the original source.
-fn validate_group_body(block: &SimpleBlock<'_>, css: &str, out: &mut Vec<Diagnostic>) {
-    // The inner text runs from the first contained value to the last; this
-    // is exact and brace-independent (it works for an unterminated block).
-    let (Some(first), Some(last)) = (block.values.first(), block.values.last()) else {
-        return;
-    };
-    let base = first.span.start;
-    let inner = &css[base..last.span.end];
-    let sub = spanned::parse_stylesheet(inner);
-    let mut sub_diags = Vec::new();
-    validate_rules(&sub.rules, inner, &mut sub_diags);
-    for mut d in sub_diags {
-        d.span = Span::new(d.span.start + base, d.span.end + base);
-        out.push(d);
-    }
-}
-
-/// Walk a style block's raw component values, splitting them into
-/// declarations the way CSS Syntax §5.4.2/§5.4.5 does, and check each
-/// declaration's property name. Every value already carries its absolute
-/// span, so findings need no offset remapping.
-fn check_block(block: &SimpleBlock<'_>, vocab: &Vocab, out: &mut Vec<Diagnostic>) {
-    let vals = &block.values;
-    let mut i = 0;
-    while i < vals.len() {
-        match &vals[i].node {
-            ComponentValue::Token(Token::Whitespace | Token::Semicolon) => {
-                i += 1;
-            }
-            // A nested at-rule inside a style block (e.g. a margin at-rule):
-            // skip to its terminating `;` or its block, whichever comes first.
-            ComponentValue::Token(Token::AtKeyword(_)) => {
-                i += 1;
-                while i < vals.len() {
-                    match &vals[i].node {
-                        ComponentValue::Token(Token::Semicolon) | ComponentValue::Block(_) => {
-                            i += 1;
-                            break;
-                        }
-                        _ => i += 1,
-                    }
-                }
-            }
-            // A declaration begins with an ident. It is a real declaration
-            // only if a `:` follows (after optional whitespace); otherwise the
-            // ident is stray and we skip the run to the next `;` so that value
-            // tokens are never mistaken for property names.
-            ComponentValue::Token(Token::Ident(name)) => {
-                let name_span = vals[i].span;
-                let mut j = i + 1;
-                while matches!(
-                    vals.get(j).map(|v| &v.node),
-                    Some(ComponentValue::Token(Token::Whitespace))
-                ) {
-                    j += 1;
-                }
-                let is_declaration = matches!(
-                    vals.get(j).map(|v| &v.node),
-                    Some(ComponentValue::Token(Token::Colon))
-                );
-                if is_declaration {
-                    check_name(name, name_span, vocab, out);
-                }
-                // Advance past the whole declaration (or stray run): everything
-                // up to the next `;` is its value, per §5.4.5.
-                i = j;
-                while i < vals.len()
-                    && !matches!(&vals[i].node, ComponentValue::Token(Token::Semicolon))
-                {
-                    i += 1;
-                }
-            }
-            _ => i += 1,
+fn check_items(items: &[BlockItem<'_>], vocab: &Vocab, out: &mut Vec<Diagnostic>) {
+    for item in items {
+        match item {
+            BlockItem::Declaration(d) => check_name(&d.node.name, d.node.name_span, vocab, out),
+            BlockItem::Rule(r) => check_rule(r, out),
         }
     }
 }
@@ -412,11 +329,39 @@ mod tests {
     }
 
     #[test]
-    fn keyframes_body_is_not_descriptor_checked() {
+    fn keyframes_blocks_hold_properties() {
         // @keyframes holds keyframe blocks (from/to/percent), not descriptors,
-        // and those blocks' declarations ARE properties. It has no descriptor
-        // set, so it is left alone (a safe miss, not a false positive).
+        // and those blocks' declarations ARE properties.
         assert!(validate_stylesheet("@keyframes spin { from { color: red } }").is_empty());
+        let d = validate_stylesheet("@-webkit-keyframes spin { 50% { colr: red } }");
+        assert_eq!(
+            d.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
+            ["colr"]
+        );
+    }
+
+    #[test]
+    fn nested_style_rules_are_checked() {
+        let css = "p { color: red; a:hover { colr: blue } & b { font-eight: 1 } }";
+        let d = validate_stylesheet(css);
+        assert_eq!(
+            d.iter().map(|d| d.span.slice(css)).collect::<Vec<_>>(),
+            ["colr", "font-eight"]
+        );
+    }
+
+    #[test]
+    fn an_unknown_at_rule_is_left_alone() {
+        assert!(validate_stylesheet("@future { colr: red; p { bogus: 1 } }").is_empty());
+        assert!(validate_stylesheet("@font-feature-values X { @swash { fancy: 1 } }").is_empty());
+    }
+
+    #[test]
+    fn a_style_attribute_with_a_nested_rule_is_checked() {
+        let css = "color: red; a { colr: blue }";
+        let d = validate_declaration_list(css);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].span.slice(css), "colr");
     }
 
     #[test]

@@ -1,18 +1,9 @@
 //! Source spans — byte ranges into the original CSS text, plus a
 //! [`Spanned<T>`] wrapper that attaches one to any value.
 //!
-//! # Prototype status
-//!
-//! This is the first slice of position support (see `SPAN_PROTOTYPE.md`).
-//! Today the **tokenizer** emits spans, via
-//! [`Tokenizer::next_token_spanned`](crate::tokenizer::Tokenizer::next_token_spanned)
-//! and [`Tokenizer::spanned`](crate::tokenizer::Tokenizer::spanned). The
-//! intended next step is to thread spans up through the parser so that
-//! [`Declaration`](crate::Declaration), [`Rule`](crate::Rule), and
-//! [`ComponentValue`](crate::ComponentValue) each carry the range covering
-//! their first..last token. That is what lets a validator (e.g. epubveri)
-//! report the exact `line:column` of a CSS finding instead of only the file
-//! name — the reason this exists.
+//! Every node of the parse tree carries one, so a consumer can report the
+//! exact `line:column` of something it found in the CSS rather than only the
+//! file name.
 
 /// A half-open byte range `[start, end)` into the original source string.
 ///

@@ -7,6 +7,115 @@ styloria is pre-1.0, so new features and breaking changes both land as
 minor-version bumps (`0.x.0`), per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+CSS Syntax Level 3 as of the **1 October 2026 Candidate Recommendation
+Draft**, and one parse tree instead of two. This is a breaking release: the
+per-level entry points are gone, and a nested rule in a style rule's block is
+now a rule rather than an error.
+
+### Changed
+
+- **One call parses everything.** `parse_stylesheet(css)` returns the whole
+  tree and every `SyntaxError` in it, sorted by position; `parse_block_contents(css)`
+  does the same for a `style="…"` attribute. Every node carries its span, as
+  the `spanned` tree did. Before, parsing stopped at each `{ … }` and a caller
+  descended one level per call, because the 2021 text left a block's meaning
+  to each at-rule's own spec. The 2026 CRD reads *every* rule's block with the
+  same §5.5.5 "consume a block's contents", so that reason is gone.
+- **A block is a list of `BlockItem`s** — `Declaration` or `Rule` — in source
+  order. The spec groups consecutive declarations; the flat list loses
+  nothing and is the order a validator reports in. `QualifiedRule::block` and
+  `AtRule::block` are `Spanned<Vec<BlockItem>>` (alias `Block`).
+- **Each block item is a declaration or a nested rule, decided as §5.5.5
+  says.** What that changes, from 0.11:
+
+  | input | 0.11 | 0.12 |
+  |---|---|---|
+  | `p { color: red; a { color: blue } }` | `MalformedDeclaration` at `a` | a nested rule, no error |
+  | `p { . a { } }` | `MalformedDeclaration` | a nested rule + `InvalidSelector` |
+  | `p { a { } color: red; }` | one malformed declaration up to `;` | a rule, then a declaration |
+  | `@media x { color: red }` | `UnterminatedRule` | a declaration, no error |
+  | a rule inside `@font-face { … }` | skipped in silence | a rule, visible |
+  | `p { color: red {} }` | a declaration | a rule + `InvalidSelector` (§5.5.6: a `{}` block may only be a whole value) |
+  | `@media print { p { } i` (trailing fragment) | `UnterminatedRule` | `MalformedDeclaration` |
+  | `--foo:hover { … }` at top level | a qualified rule | dropped, reported as `DroppedCustomPropertyRule` |
+
+  `color red;` and `1px: red;` are still one `MalformedDeclaration` /
+  `UnexpectedToken` each. Which kinds can occur at the top level and which
+  inside a block is now a table on `SyntaxErrorKind`.
+- **`!important` follows the spec's rule** everywhere: the last two
+  non-whitespace values, stripped from the value. The value-based path used
+  to accept any `!` and any `important`, and kept both in the value.
+- **The at-rule table no longer decides how a block is parsed**, only whether
+  nested preludes are checked as selectors (`@media`, `@supports`,
+  `@container`, `@layer`, `@scope`, `@document`, `@starting-style`; not
+  `@keyframes`, not at-rules this crate does not know).
+- **Non-ASCII ident code points are the CRD's narrower set**
+  (w3c/csswg-drafts#7129): letters of every script still are, but U+00A0
+  NO-BREAK SPACE, the other Unicode spaces and the C1 controls now tokenize
+  as delims. No stylesheet on the 852-sheet test shelf changed.
+- **`validate` walks the tree** instead of re-parsing `@media` bodies, and
+  so reaches declarations it could not before: in nested style rules, in
+  `@keyframes` blocks, directly inside a conditional group rule, and in a
+  `style` attribute's nested rules.
+- **`serialize` writes the tree.** `serialize_declaration_list` is now
+  `serialize_block_contents`.
+
+### Added
+
+- **`Token::BadUrl` carries its raw text**, from `url(` to the `)` that ended
+  recovery, so a caller can quote it without re-tokenizing.
+- **`Token::UnicodeRange { start, end }`.** §5.5.6 re-reads the value of a
+  `unicode-range` declaration with unicode ranges allowed, so
+  `U+0-7F, U+4??` comes back as two ranges instead of an ident, numbers and
+  dimensions. Nowhere else: `u+a { }` is still a selector.
+- **`SyntaxErrorKind::DroppedCustomPropertyRule`** for a top-level rule that
+  starts like a custom property. §5.5.3 drops it without naming a parse
+  error; it is reported so the dropped content leaves a trace. The span
+  covers the whole construct.
+- **`validate_relative_selector_list`.** A style rule nested in a style
+  rule has a relative selector list for a prelude (CSS Nesting §2.1), so
+  `p { > a { } }` is valid and is not reported; `> a { }` at the top level
+  still is.
+- `validate_parsed_stylesheet` and `validate_parsed_block`, for a caller that
+  already holds the tree; `Rule::prelude`, `Rule::block` and
+  `BlockItem::span`.
+
+### Removed
+
+- The position-less `Parser` and its types (`styloria::Stylesheet` and
+  friends at the crate root are now the spanned ones), the `spanned`
+  module, `parse_rule_list`, `parse_declaration_list_from_values`,
+  `parse_at_rule_block`, `BlockContents`, `DeclarationListItem`,
+  `parse_declaration_list(_with_errors)` and `parse_stylesheet_with_errors`.
+  `SPAN_PROTOTYPE.md`, which described the two-tree design.
+
+### Fixed
+
+- **`validate_stylesheet` was quadratic in `@media` nesting**, and then
+  overflowed the stack: it re-parsed each conditional group rule's body
+  from text, one level at a time. 100,000 nested `@media` ran for minutes and
+  then aborted the process. It is now one walk over the tree; the same input
+  parses and validates in about 10 ms.
+- **A backslash at the end of input is an escape** (U+FFFD), per §4.3.8,
+  which only disqualifies a newline (WPT `escaped-eof.html`). It was a delim.
+- **A NUL is U+FFFD**, an ident code point (§3.3), inside names and strings
+  as well as escapes. It was a delim.
+- The serializer escapes a newline in a `url()` value by code point (a
+  backslash-newline is not an escape), escapes non-ASCII code points that are
+  not ident code points, and writes a bad string so it re-reads as one
+  rather than swallowing what follows.
+
+### Performance
+
+The input is tokenized once and every bracket paired with its closer in the
+same pass, so "try a declaration, then re-read as a rule" is decided by
+looking at one level of tokens and building the item once — linear however
+deeply the input nests. On the 852 stylesheets of the test shelf, parsing
+plus validation went from 125 ms to 52 ms per pass, with the same 34 errors
+at the same positions. Peak memory on the 3–4.5 MB hostile inputs measured is below 0.11's.
+
 ## [0.11.0] - 2026-08-18
 
 ### Added

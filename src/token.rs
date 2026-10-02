@@ -1,5 +1,5 @@
 //! CSS token types (CSS Syntax Level 3, §4 "Tokenization":
-//! <https://www.w3.org/TR/css-syntax-3/#tokenization>).
+//! <https://www.w3.org/TR/2026/CRD-css-syntax-3-20261001/#tokenization>).
 //!
 //! Tokens borrow from the tokenizer's input (`&'a str`) wherever possible;
 //! they only own a `String` when their content required un-escaping (a
@@ -39,7 +39,11 @@ pub enum Token<'a> {
     Url(Cow<'a, str>),
     /// A `url(...)` whose contents couldn't be tokenized (unescaped quote/
     /// paren/whitespace-then-non-close inside). Still non-fatal.
-    BadUrl,
+    ///
+    /// Carries the token's raw source text, from `url(` up to and including
+    /// the `)` that ended the recovery (or to the end of input), so a caller
+    /// can quote what the author wrote without re-tokenizing.
+    BadUrl(Cow<'a, str>),
     /// A single code point that didn't start any other token.
     Delim(char),
     Number {
@@ -60,6 +64,17 @@ pub enum Token<'a> {
         unit: Cow<'a, str>,
         repr: &'a str,
     },
+    /// `U+0-7F`, `U+4??`: an inclusive range of code points (§4.3.14).
+    ///
+    /// Never produced while tokenizing a stylesheet. The parser re-reads the
+    /// value of a `unicode-range` declaration with unicode ranges allowed
+    /// (§5.5.6), and that is the only place this token appears — elsewhere
+    /// `u+a` is an ident and a number, which is what keeps `u+a { }` a
+    /// selector.
+    UnicodeRange {
+        start: u32,
+        end: u32,
+    },
     Whitespace,
     /// `<!--`
     Cdo,
@@ -77,8 +92,8 @@ pub enum Token<'a> {
 }
 
 impl<'a> Token<'a> {
-    /// True for the four bracket-opening tokens a "simple block" can start
-    /// with (CSS Syntax Level 3 §5.4.7).
+    /// True for the three bracket-opening tokens a "simple block" can start
+    /// with (CSS Syntax Level 3 §5.5.9).
     pub fn is_block_open(&self) -> bool {
         matches!(
             self,

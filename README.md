@@ -3,25 +3,40 @@
 A pure-Rust CSS3 parser and serializer — a standalone, general-purpose
 library, not tied to any single consumer project.
 
-**Status: early (0.x).** The [CSS Syntax Level 3](https://www.w3.org/TR/css-syntax-3/)
-tokenizer, parser (into a structural stylesheet model), and serializer work and
-are used in production by [`epubveri`](https://github.com/veripublica/epubveri).
-The public API may still change before 1.0.
+**Status: early (0.x).** The tokenizer, parser and serializer follow
+[CSS Syntax Level 3](https://www.w3.org/TR/2026/CRD-css-syntax-3-20261001/)
+as of the **1 October 2026 Candidate Recommendation Draft**, including its
+nesting-aware block parsing, and are used in production by
+[`epubveri`](https://github.com/veripublica/epubveri). The public API may
+still change before 1.0.
 
-As of 0.2, an optional **source-span** layer records the byte range (and thus
-`line:column`) of tokens and parse nodes, so a consumer can report the exact
-position of something it finds in the CSS — see the `span` and `spanned`
-modules and [`SPAN_PROTOTYPE.md`](./SPAN_PROTOTYPE.md). It is fully additive:
-the existing position-less parser and types are unchanged.
+```rust
+let css = "p { color: red; a:hover { color: blue } }";
+let (sheet, errors) = styloria::parse_stylesheet(css);
+assert!(errors.is_empty());
+// One tree: rules, the declarations and nested rules in their blocks, and
+// the component values inside those — every node with its byte span.
+let rule = &sheet.rules[0];
+assert_eq!(rule.span.start_line_col(css), (1, 1));
+```
 
-As of 0.3, a **validation** layer (`validate` module) checks declaration
-*names* against the CSS vocabulary: `validate_stylesheet` flags unknown
-properties in style rules (descending into `@media`/`@supports`) and unknown
-descriptors in at-rules (`@font-face`, `@counter-style`, `@page`, …);
-`validate_declaration_list` does the same for an inline `style="…"` attribute.
-Each finding carries the exact span to underline. Custom (`--*`) and
-vendor-prefixed names are exempt, and the check errs toward silence — it never
-invents an error. Value-level validation is a later layer.
+- **`parse_stylesheet`** returns the whole tree and every `SyntaxError` the
+  parser recovered from, sorted by position. **`parse_block_contents`** does
+  the same for the inside of a block, such as an HTML `style="…"` attribute.
+- Every block is read with the spec's "consume a block's contents", so a
+  block is a list of declarations and nested rules in source order, whatever
+  rule holds it. Which of them are *allowed* in a given context is left to
+  the caller.
+- **Validation** (`validate` module) checks declaration *names* against the
+  CSS vocabulary: unknown properties in style rules and unknown descriptors
+  in at-rules (`@font-face`, `@counter-style`, `@page`, …), each with the span
+  to underline. Custom (`--*`) and vendor-prefixed names are exempt, and the
+  check errs toward silence. Selector lists are checked for syntax.
+  Value-level validation is a later layer.
+- **Serialization** (`serialize` module) writes the tree back as equivalent
+  CSS.
+- Nesting is bounded (`MAX_NESTING_DEPTH`), and parsing stays linear on
+  hostile input, so no stylesheet can exhaust the stack or the clock.
 
 ## Why
 
@@ -32,12 +47,12 @@ every use case. `styloria` aims to be:
 - **Pure Rust** — no C dependencies.
 - **Standalone** — usable by any Rust project that needs to parse, validate,
   or serialize CSS, not coupled to a particular consumer.
-- **Spec-driven** — starts from the [CSS Syntax Level 3](https://www.w3.org/TR/css-syntax-3/)
+- **Spec-driven** — starts from the [CSS Syntax Level 3](https://www.w3.org/TR/2026/CRD-css-syntax-3-20261001/)
   tokenizer and core grammar (the well-specified, property-agnostic layer),
   then builds structural/semantic validation on top.
 
 `styloria` is developed alongside [`epubveri`](https://github.com/veripublica/epubveri)
-(a pure-Rust EPUB validator), which will depend on it for EPUB content
+(a pure-Rust EPUB validator), which depends on it for EPUB content
 documents' embedded/linked CSS — but `styloria` itself is not EPUB-specific,
 and is meant to be independently useful.
 
