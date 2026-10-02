@@ -387,13 +387,13 @@ struct Parser<'a> {
     /// False while re-reading a unicode-range value, whose tokens were
     /// already reported on during the main pass.
     report: bool,
+    /// Items of the blocks being read, innermost last; see `block_contents`.
+    items: Vec<BlockItem<'a>>,
 }
 
 impl<'a> Parser<'a> {
     fn new(input: &'a str) -> Self {
-        let mut p = Parser::from_tokens(input, Tokenizer::new(input), true);
-        p.unicode_range_errors();
-        p
+        Parser::from_tokens(input, Tokenizer::new(input), true)
     }
 
     /// Tokenize everything and pair the brackets, in one pass.
@@ -434,6 +434,9 @@ impl<'a> Parser<'a> {
                     span: t.span,
                     kind: SyntaxErrorKind::BadUrl,
                 }),
+                Token::Ident(name) if name.len() == 1 && name.eq_ignore_ascii_case("u") => {
+                    errors.extend(unicode_range_error(input, t.span));
+                }
                 _ => {}
             }
             toks.push(t);
@@ -453,6 +456,7 @@ impl<'a> Parser<'a> {
             depth: 0,
             errors,
             report,
+            items: Vec::new(),
         }
     }
 
@@ -700,27 +704,29 @@ impl<'a> Parser<'a> {
 
     /// §5.5.5 "Consume a block's contents". Stops at the `}` that closes the
     /// block, or the end of input, without consuming it.
+    ///
+    /// Items are collected on a stack shared by every block, then moved into
+    /// a list of exactly their number: a block's length is not known until
+    /// its end, and growing each block's own list would cost a reallocation
+    /// per doubling and leave up to half of it empty.
     fn block_contents(&mut self, ctx: Context) -> Vec<BlockItem<'a>> {
-        let mut items = Vec::new();
+        let base = self.items.len();
         while let Some(t) = self.tok(self.pos) {
             match t {
                 Token::Whitespace | Token::Semicolon => self.pos += 1,
                 Token::RightCurly => break,
                 Token::AtKeyword(_) => {
                     let r = self.at_rule(true, ctx);
-                    items.push(BlockItem::Rule(r));
+                    self.items.push(BlockItem::Rule(r));
                 }
                 _ => {
                     if let Some(item) = self.block_item(ctx) {
-                        items.push(item);
+                        self.items.push(item);
                     }
                 }
             }
         }
-        // As in `values_until`: most blocks are short, and a block item is
-        // large enough for the spare capacity to dominate the tree.
-        items.shrink_to_fit();
-        items
+        self.items.drain(base..).collect()
     }
 
     /// One item of a block that is not an at-rule: "consume a declaration,
@@ -950,60 +956,46 @@ impl<'a> Parser<'a> {
         };
         Spanned::new(node, open_span.to(end))
     }
+}
 
-    /// Malformed `U+…` unicode-ranges, as epubcheck's CSS scanner reports them
-    /// (`SCANNER_ILLEGAL_URANGE`).
-    ///
-    /// Its rule is narrower than it sounds: it walks the characters after `U+`
-    /// that are hex digits, `?` or `-`, and errors when **seven** of them
-    /// appear without an intervening `-`. Nothing else is checked — not the
-    /// ordering of a range, not whether `?` only trails, not whether the
-    /// endpoints make sense. Six hex digits is the most a real code point
-    /// needs (`U+10FFFF`), so a run of seven is malformed under any reading,
-    /// which is what makes this safe to report.
-    ///
-    /// Detection walks the **token stream**, not the raw text. `U+00000000`
-    /// inside a string or a comment is one `String` token or skipped
-    /// entirely, so it cannot be mistaken for a range — which scanning the
-    /// source directly would do.
-    fn unicode_range_errors(&mut self) {
-        const MAX_RUN: usize = 6;
-        for t in &self.toks {
-            // Anchor on the `u` ident, then read the source after it. Reading
-            // the *source* rather than the following tokens is deliberate:
-            // `U+0-7F` tokenizes as Ident("U"), Number(+0), … because a
-            // stylesheet is tokenized with unicode ranges off, and the
-            // character run epubcheck counts does not survive that.
-            let Token::Ident(name) = &t.node else {
-                continue;
-            };
-            if !name.eq_ignore_ascii_case("u") {
-                continue;
-            }
-            let after_ident = &self.input[t.span.end..];
-            if !after_ident.starts_with('+') {
-                continue;
-            }
-            let mut run = 0usize;
-            for (i, c) in after_ident[1..].char_indices() {
-                if c == '-' {
-                    run = 0;
-                    continue;
-                }
-                if !c.is_ascii_hexdigit() && c != '?' {
-                    break;
-                }
-                run += 1;
-                if run > MAX_RUN {
-                    self.errors.push(SyntaxError {
-                        span: Span::new(t.span.start, t.span.end + 1 + i + c.len_utf8()),
-                        kind: SyntaxErrorKind::InvalidUnicodeRange,
-                    });
-                    break;
-                }
-            }
+/// A malformed `U+…` unicode-range starting at the `u` ident at `u`, as
+/// epubcheck's CSS scanner reports them (`SCANNER_ILLEGAL_URANGE`).
+///
+/// Its rule is narrower than it sounds: it walks the characters after `U+`
+/// that are hex digits, `?` or `-`, and errors when **seven** of them appear
+/// without an intervening `-`. Nothing else is checked — not the ordering of
+/// a range, not whether `?` only trails, not whether the endpoints make
+/// sense. Six hex digits is the most a real code point needs (`U+10FFFF`), so
+/// a run of seven is malformed under any reading, which is what makes this
+/// safe to report.
+///
+/// Detection anchors on **tokens**, not the raw text. `U+00000000` inside a
+/// string or a comment is one `String` token or skipped entirely, so it
+/// cannot be mistaken for a range — which scanning the source directly would
+/// do. After the anchor it reads the *source*: `U+0-7F` tokenizes as
+/// Ident("U"), Number(+0), … because a stylesheet is tokenized with unicode
+/// ranges off, and the character run epubcheck counts does not survive that.
+fn unicode_range_error(input: &str, u: Span) -> Option<SyntaxError> {
+    const MAX_RUN: usize = 6;
+    let after_ident = input[u.end..].strip_prefix('+')?;
+    let mut run = 0usize;
+    for (i, c) in after_ident.char_indices() {
+        if c == '-' {
+            run = 0;
+            continue;
+        }
+        if !c.is_ascii_hexdigit() && c != '?' {
+            return None;
+        }
+        run += 1;
+        if run > MAX_RUN {
+            return Some(SyntaxError {
+                span: Span::new(u.start, u.end + 1 + i + c.len_utf8()),
+                kind: SyntaxErrorKind::InvalidUnicodeRange,
+            });
         }
     }
+    None
 }
 
 /// §5.5.6: if the last two non-whitespace values are `!` then an `important`

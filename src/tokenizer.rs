@@ -205,9 +205,13 @@ impl<'a> Tokenizer<'a> {
     /// §4.3.12 "Consume an ident sequence".
     fn consume_name(&mut self) -> Cow<'a, str> {
         let start = self.pos;
+        let bytes = self.input.as_bytes();
         loop {
+            // The common case, an ASCII name, in a tight loop.
+            while self.pos < bytes.len() && is_ascii_name(bytes[self.pos]) {
+                self.pos += 1;
+            }
             match self.byte(self.pos) {
-                Some(b) if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' => self.pos += 1,
                 Some(0 | b'\\') => break,
                 Some(b) if b >= 0x80 => match self.ident_start_len(self.pos) {
                     Some(n) => self.pos += n,
@@ -381,13 +385,15 @@ impl<'a> Tokenizer<'a> {
     }
 
     fn skip_whitespace(&mut self) {
-        while matches!(self.byte(self.pos), Some(b) if is_whitespace(b)) {
+        let bytes = self.input.as_bytes();
+        while self.pos < bytes.len() && is_whitespace(bytes[self.pos]) {
             self.pos += 1;
         }
     }
 
     fn skip_digits(&mut self) {
-        while matches!(self.byte(self.pos), Some(b) if b.is_ascii_digit()) {
+        let bytes = self.input.as_bytes();
+        while self.pos < bytes.len() && bytes[self.pos].is_ascii_digit() {
             self.pos += 1;
         }
     }
@@ -675,6 +681,24 @@ fn is_non_ascii_ident(c: char) -> bool {
 pub(crate) fn is_name(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '-' || c == '_' || is_non_ascii_ident(c)
 }
+
+/// ASCII ident code points: letters, digits, `-`, `_`. A lookup table,
+/// since this is the innermost loop of tokenizing.
+#[inline]
+fn is_ascii_name(b: u8) -> bool {
+    ASCII_NAME[b as usize]
+}
+
+static ASCII_NAME: [bool; 256] = {
+    let mut t = [false; 256];
+    let mut b = 0;
+    while b < 128 {
+        let c = b as u8;
+        t[b] = c.is_ascii_alphanumeric() || c == b'-' || c == b'_';
+        b += 1;
+    }
+    t
+};
 
 fn is_non_printable(b: u8) -> bool {
     matches!(b, 0x01..=0x08 | 0x0b | 0x0e..=0x1f | 0x7f)
@@ -1115,6 +1139,17 @@ mod tests {
         assert_eq!(tokens("\"a\\"), vec![Token::String("a".into())]);
         // Before a newline it is not an escape at all.
         assert_eq!(tokens("\\\n")[0], Token::Delim('\\'));
+    }
+
+    #[test]
+    fn comments_end_at_the_first_star_slash() {
+        assert_eq!(tokens("/* a * b ** / */x"), vec![Token::Ident("x".into())]);
+        assert_eq!(
+            tokens("/**/x/***/y"),
+            vec![Token::Ident("x".into()), Token::Ident("y".into())]
+        );
+        assert_eq!(tokens("/* *"), vec![]);
+        assert_eq!(tokens("/*"), vec![]);
     }
 
     #[test]

@@ -112,9 +112,15 @@ now a rule rather than an error.
 The input is tokenized once and every bracket paired with its closer in the
 same pass, so "try a declaration, then re-read as a rule" is decided by
 looking at one level of tokens and building the item once — linear however
-deeply the input nests. On the 852 stylesheets of the test shelf, parsing
-plus validation went from 125 ms to 52 ms per pass, with the same 34 errors
-at the same positions. Peak memory on the 3–4.5 MB hostile inputs measured is below 0.11's.
+deeply the input nests. Property names are looked up in a hash table built
+at compile time rather than by binary search over a lower-cased copy.
+
+On the 852 stylesheets of the test shelf, `parse_stylesheet` plus
+`validate_stylesheet` went from 125 ms to 50 ms per pass, with the same 34
+errors at the same positions; validating the tree already parsed
+(`validate_parsed_stylesheet`) brings it to 21 ms. Parsing alone runs at
+about 130 MB/s. Peak memory on the 3–4.5 MB hostile inputs measured is below
+0.11's.
 
 ## [0.11.0] - 2026-08-18
 

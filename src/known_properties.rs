@@ -791,13 +791,70 @@ pub(crate) const KNOWN_PROPERTIES: &[&str] = &[
     "zoom",
 ];
 
+/// Whether `name` is a known property, compared ASCII case-insensitively.
+///
+/// `validate` asks this once per declaration, so it is a hash lookup rather
+/// than a binary search: the table below is built at compile time, and the
+/// name is hashed and compared in lower case on the fly, without allocating.
+/// On the 852-sheet test shelf the binary search, with a lower-cased copy of
+/// every name, was a quarter of parse-plus-validate time.
+pub(crate) fn is_known_property(name: &str) -> bool {
+    let mut i = hash_lower(name.as_bytes()) as usize & MASK;
+    loop {
+        match TABLE[i] {
+            0 => return false,
+            slot => {
+                if KNOWN_PROPERTIES[slot as usize - 1].eq_ignore_ascii_case(name) {
+                    return true;
+                }
+            }
+        }
+        i = (i + 1) & MASK;
+    }
+}
+
+/// Open addressing, linear probing, at most 40% full: a miss usually ends at
+/// the first empty slot. Each slot holds an index into `KNOWN_PROPERTIES`
+/// plus one, so 0 is empty.
+const SLOTS: usize = 2048;
+const MASK: usize = SLOTS - 1;
+const _: () = assert!(KNOWN_PROPERTIES.len() * 5 <= SLOTS * 2);
+
+static TABLE: [u16; SLOTS] = build_table();
+
+/// FNV-1a over the ASCII-lower-cased bytes.
+const fn hash_lower(bytes: &[u8]) -> u32 {
+    let mut h: u32 = 0x811c_9dc5;
+    let mut i = 0;
+    while i < bytes.len() {
+        h ^= bytes[i].to_ascii_lowercase() as u32;
+        h = h.wrapping_mul(0x0100_0193);
+        i += 1;
+    }
+    h
+}
+
+const fn build_table() -> [u16; SLOTS] {
+    let mut table = [0u16; SLOTS];
+    let mut n = 0;
+    while n < KNOWN_PROPERTIES.len() {
+        let mut i = hash_lower(KNOWN_PROPERTIES[n].as_bytes()) as usize & MASK;
+        while table[i] != 0 {
+            i = (i + 1) & MASK;
+        }
+        table[i] = (n + 1) as u16;
+        n += 1;
+    }
+    table
+}
+
 #[cfg(test)]
 mod tests {
-    use super::KNOWN_PROPERTIES;
+    use super::{KNOWN_PROPERTIES, is_known_property};
 
-    // `validate` looks properties up with `binary_search`, which is only
-    // correct on a strictly-ascending, deduplicated slice. Guard the
-    // generated table against a regeneration that breaks either.
+    // The table is generated from two registries; guard it against a
+    // regeneration that leaves a duplicate, an upper-case entry or a
+    // vendor-prefixed one (those are exempt in `validate`, never looked up).
     #[test]
     fn table_is_sorted_deduped_and_lowercase() {
         for pair in KNOWN_PROPERTIES.windows(2) {
@@ -830,7 +887,29 @@ mod tests {
             "word-wrap",
             "text-rendering",
         ] {
-            assert!(KNOWN_PROPERTIES.binary_search(&p).is_ok(), "missing {p:?}");
+            assert!(is_known_property(p), "missing {p:?}");
+        }
+    }
+
+    /// The hash lookup agrees with the list: every entry is found, in any
+    /// case, and near misses are not.
+    #[test]
+    fn lookup_finds_every_entry_and_nothing_else() {
+        for &p in KNOWN_PROPERTIES {
+            assert!(is_known_property(p), "{p}");
+            assert!(is_known_property(&p.to_ascii_uppercase()), "{p}");
+            // Near misses are found exactly when they are themselves entries
+            // (`r` + `x` is `rx`, an SVG property).
+            for near in [format!("{p}x"), p[1..].to_string()] {
+                assert_eq!(
+                    is_known_property(&near),
+                    KNOWN_PROPERTIES.contains(&near.as_str()),
+                    "{near}"
+                );
+            }
+        }
+        for p in ["", "font-eight", "colr", "-webkit-hyphens", "--x", "çolor"] {
+            assert!(!is_known_property(p), "{p}");
         }
     }
 }

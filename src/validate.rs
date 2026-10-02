@@ -32,7 +32,7 @@
 //! toward silence.
 
 use crate::descriptors::descriptors_for;
-use crate::known_properties::KNOWN_PROPERTIES;
+use crate::known_properties::is_known_property;
 use crate::parser::{self, BlockItem, Rule, Stylesheet};
 use crate::span::{Span, Spanned};
 
@@ -147,8 +147,7 @@ fn check_name(name: &str, span: Span, vocab: &Vocab, out: &mut Vec<Diagnostic>) 
     if name.starts_with('-') {
         return;
     }
-    let lower = name.to_ascii_lowercase();
-    let is_property = || KNOWN_PROPERTIES.binary_search(&lower.as_str()).is_ok();
+    let is_property = || is_known_property(name);
     let (valid, kind) = match vocab {
         Vocab::Property => (is_property(), DiagnosticKind::UnknownProperty),
         Vocab::Descriptor {
@@ -156,7 +155,7 @@ fn check_name(name: &str, span: Span, vocab: &Vocab, out: &mut Vec<Diagnostic>) 
             names,
             allow_properties,
         } => {
-            let ok = names.binary_search(&lower.as_str()).is_ok()
+            let ok = names.iter().any(|n| n.eq_ignore_ascii_case(name))
                 || (*allow_properties && is_property());
             (ok, DiagnosticKind::UnknownDescriptor { at_rule })
         }

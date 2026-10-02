@@ -69,14 +69,15 @@ fn validate_list(prelude: &[Spanned<ComponentValue<'_>>], relative: bool) -> Vec
     let mut errors = Vec::new();
     // A prelude splits on top-level commas into complex selectors. An empty
     // side (`, p`, `a,`, `a,,b`) is the one comma error worth reporting.
-    for part in split_on_commas(prelude, &mut errors) {
-        let mut part_errors = Vec::new();
+    // `part_errors` only allocates when a part is actually broken.
+    let mut part_errors = Vec::new();
+    split_on_commas(prelude, &mut errors, |part, errors| {
         validate_complex(part, relative, &mut part_errors);
         // The earliest one: it is where the author has to start reading, and
         // everything after it is usually this parser losing its footing
         // rather than a second independent mistake.
-        errors.extend(part_errors.into_iter().next());
-    }
+        errors.extend(part_errors.drain(..).next());
+    });
     errors
 }
 
@@ -102,7 +103,7 @@ pub fn type_selector_names<'a>(
 ) -> Vec<Spanned<std::borrow::Cow<'a, str>>> {
     let mut out = Vec::new();
     let mut sink = Vec::new();
-    for part in split_on_commas(prelude, &mut sink) {
+    split_on_commas(prelude, &mut sink, |part, _| {
         let mut expect_compound = true;
         let mut i = 0;
         while i < part.len() {
@@ -144,7 +145,7 @@ pub fn type_selector_names<'a>(
             }
             expect_compound = false;
         }
-    }
+    });
     out
 }
 
@@ -154,8 +155,9 @@ pub fn type_selector_names<'a>(
 fn split_on_commas<'p, 'a>(
     prelude: &'p [Spanned<ComponentValue<'a>>],
     errors: &mut Vec<SyntaxError>,
-) -> Vec<&'p [Spanned<ComponentValue<'a>>]> {
-    let mut parts = Vec::new();
+    mut each: impl FnMut(&'p [Spanned<ComponentValue<'a>>], &mut Vec<SyntaxError>),
+) {
+    let mut parts = 0;
     let mut start = 0;
     for (i, cv) in prelude.iter().enumerate() {
         if matches!(&cv.node, ComponentValue::Token(Token::Comma)) {
@@ -166,7 +168,8 @@ fn split_on_commas<'p, 'a>(
                     kind: SyntaxErrorKind::InvalidSelector,
                 });
             } else {
-                parts.push(part);
+                parts += 1;
+                each(part, errors);
             }
             start = i + 1;
         }
@@ -177,7 +180,7 @@ fn split_on_commas<'p, 'a>(
     // already an UnterminatedRule/UnexpectedToken case upstream. Only a
     // *trailing* comma (parts already non-empty) is reported here.
     if is_blank(tail) {
-        if !parts.is_empty()
+        if parts > 0
             && let Some(last) = prelude.last()
         {
             errors.push(SyntaxError {
@@ -186,9 +189,8 @@ fn split_on_commas<'p, 'a>(
             });
         }
     } else {
-        parts.push(tail);
+        each(tail, errors);
     }
-    parts
 }
 
 /// A complex selector: compounds joined by combinators. Reports a combinator
