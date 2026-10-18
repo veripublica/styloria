@@ -7,7 +7,17 @@ styloria is pre-1.0, so new features and breaking changes both land as
 minor-version bumps (`0.x.0`), per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
-## [Unreleased]
+## [0.13.0] - 2026-10-18
+
+One selector parser, which builds a tree with specificity, and selector
+matching against the caller's own tree. A selector list is now a
+`SelectorList` of spanned nodes, `matches` answers three-valued (`Yes`, `No`,
+`Unknown`) through the `Element` trait, and the preludes of `@namespace`,
+`@import`, `@layer` and `@media` are read as structure. This is a breaking
+release: `validate_selector_list` and `validate_relative_selector_list` are
+replaced by `parse_selector_list` and `parse_relative_selector_list`, and the
+new `SyntaxErrorKind::InvalidSelectorStructure` breaks any exhaustive `match`
+on `SyntaxErrorKind`.
 
 ### Changed
 
