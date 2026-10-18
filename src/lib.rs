@@ -8,12 +8,15 @@
 //! [`parse_block_contents`] does the same for a `style="…"` attribute.
 
 pub mod at_rule;
+pub mod cascade;
 mod descriptors;
 mod known_properties;
 pub mod matching;
 pub mod parser;
+pub mod properties;
 pub mod selector;
 pub mod serialize;
+mod shorthands;
 pub mod span;
 pub mod token;
 pub mod tokenizer;
@@ -24,12 +27,16 @@ pub use at_rule::{
     NamespaceRule, parse_import_rule, parse_layer_rule, parse_media_query_list,
     parse_namespace_rule,
 };
+pub use cascade::{
+    Candidate, Cascade, ElementStyle, PropertyAnswer, Setter, Sheet, UnknownReason, UnknownReasons,
+};
 pub use matching::{Element, HTML_NAMESPACE, Match, Namespaces};
 pub use parser::{
     AtRule, Block, BlockItem, BlockKind, ComponentValue, Declaration, MAX_NESTING_DEPTH,
     QualifiedRule, Rule, SimpleBlock, Stylesheet, SyntaxError, SyntaxErrorKind,
     parse_block_contents, parse_stylesheet, syntax_errors,
 };
+pub use properties::longhands;
 pub use selector::{
     AnB, AttributeCase, AttributeOperator, AttributeSelector, AttributeValue, Combinator,
     ComplexSelector, CompoundSelector, MAX_SELECTOR_DEPTH, Namespace, PseudoClass, PseudoElement,

@@ -7,6 +7,32 @@ styloria is pre-1.0, so new features and breaking changes both land as
 minor-version bumps (`0.x.0`), per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Added
+
+- **The cascade, as a query** (`cascade` module). `Cascade::new` takes a
+  document's stylesheets in order (each `Sheet` may be marked conditional,
+  for a `<link media>`); `style_for(element, inline)` matches every rule
+  once and returns every declaration that could apply, highest precedence
+  first, the element's own `style` attribute included;
+  `ElementStyle::property(name)` answers `Match::Yes`, `No` or `Unknown`
+  for one property, with every setter's declaration and rule (and so their
+  spans). Precedence follows CSS Cascade 5: `!important`, the `style`
+  attribute, `@layer` order (reversed for `!important`), specificity, order
+  of appearance. Shorthands set their longhands and `all` sets everything
+  but `direction`, `unicode-bidi` and custom properties. What cannot be
+  settled is Unknown and says why (`UnknownReason`): an Unknown selector, a
+  rule inside `@media`/`@supports`/`@container`/`@scope`/`@document`/
+  `@starting-style`, a conditional sheet, a nested style rule, a logical
+  property standing for a physical one (or the reverse), a vendor prefix,
+  `revert`. Values are not checked.
+- **`longhands(name)`**: the longhands a shorthand sets, nested shorthands
+  expanded, from a table generated from MDN's data (mdn-data 2.37.2) and
+  completed with the reset-only sub-properties the specs name (`border`
+  resets `border-image`, `font` resets `font-variant-*` and
+  `font-size-adjust`, …).
+
 ## [0.13.0] - 2026-10-18
 
 One selector parser, which builds a tree with specificity, and selector
