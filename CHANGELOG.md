@@ -7,6 +7,41 @@ styloria is pre-1.0, so new features and breaking changes both land as
 minor-version bumps (`0.x.0`), per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Changed
+
+- **One selector parser, which builds a tree.** `parse_selector_list` and
+  `parse_relative_selector_list` replace `validate_selector_list` and
+  `validate_relative_selector_list`: they return a `SelectorList`
+  (`ComplexSelector` → `CompoundSelector` → `SimpleSelector`, a span on every
+  node) or the `SyntaxError`s, still at most one per comma-separated
+  selector. `type_selector_names` is read from the same tree.
+- **Arguments with a fixed grammar are now checked**: `:not()` and `:has()`
+  (selector lists), `:nth-child()` and its family (`An+B`, and `of S`).
+  `:is()` and `:where()` are forgiving, as the spec says: a bad argument is
+  dropped, not reported. Other pseudo-classes and pseudo-elements, known or
+  not, are still accepted with their arguments unread.
+- **Newly reported**, each a shape no version of Selectors allows: an id
+  that is not an identifier (`#1a`), a type or universal selector after
+  another simple selector (`[x]p`; `&div` stays valid), anything but a
+  pseudo-class or pseudo-element after a pseudo-element (`p::before.x`), a
+  pseudo-element before the last compound (`p::before span`), and more than
+  one flag after an attribute value (`[a=x i s]`). No stylesheet on the
+  878-sheet shelf changed.
+
+### Added
+
+- **`Specificity`**, ordered as the cascade compares it, on `SelectorList`,
+  `ComplexSelector` and `SimpleSelector`. `:is()`, `:not()` and `:has()`
+  take their most specific argument, `:where()` is zero, and
+  `:nth-child(… of S)` adds S to its own class. `&` counts as zero, since its
+  value is the parent rule's.
+- **`AnB`** (CSS Syntax §7), with `matches(index)`.
+- **`MAX_SELECTOR_DEPTH`** (32): selector arguments deeper than this come
+  back as `PseudoClass::Other`, unread, so that `:is(:is(…))` at the
+  parser's nesting limit cannot overflow the stack.
+
 ## [0.12.0] - 2026-10-02
 
 CSS Syntax Level 3 as of the **1 October 2026 Candidate Recommendation

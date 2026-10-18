@@ -22,7 +22,12 @@ pub use parser::{
     QualifiedRule, Rule, SimpleBlock, Stylesheet, SyntaxError, SyntaxErrorKind,
     parse_block_contents, parse_stylesheet, syntax_errors,
 };
-pub use selector::{type_selector_names, validate_relative_selector_list, validate_selector_list};
+pub use selector::{
+    AnB, AttributeCase, AttributeOperator, AttributeSelector, AttributeValue, Combinator,
+    ComplexSelector, CompoundSelector, MAX_SELECTOR_DEPTH, Namespace, PseudoClass, PseudoElement,
+    QualifiedName, SelectorList, SimpleSelector, Specificity, parse_relative_selector_list,
+    parse_selector_list, type_selector_names,
+};
 pub use serialize::{serialize_block_contents, serialize_stylesheet};
 pub use span::{Span, Spanned};
 pub use token::{NumericType, Token};

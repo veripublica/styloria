@@ -1,84 +1,402 @@
-//! Selector-list syntax validation for a qualified rule's prelude.
+//! Selectors (Selectors Level 4) read from a qualified rule's prelude.
 //!
 //! CSS Syntax Level 3 — which [`crate::parser`] implements — deliberately
 //! does *not* look at what a qualified rule's prelude says. It groups the
 //! prelude into component values and hands them on, so `a > > b { }` and
 //! `[= x] { }` parse as happily as `a > b { }`. That is correct per the
-//! Syntax spec, and useless to a tool that wants to report malformed CSS.
+//! Syntax spec, and useless to a tool that wants to report malformed CSS or
+//! to know what a rule applies to.
 //!
-//! This module reads that prelude as a **selector list** (Selectors Level 4
-//! §3) and reports the places it cannot be one. It is a *syntactic* check
-//! only — the shape of the selector, never its meaning:
+//! This module reads that prelude as a **selector list** and builds its tree:
+//! [`SelectorList`] → [`ComplexSelector`] (compounds joined by combinators) →
+//! [`CompoundSelector`] → [`SimpleSelector`]. Every node carries its span. A
+//! prelude that cannot be a selector list comes back as the
+//! [`SyntaxError`]s saying where, which is what the parser reports as
+//! [`SyntaxErrorKind::InvalidSelector`]. [`Specificity`] is computed from the
+//! tree.
 //!
-//! - it does not care whether `dvi` is a real element name (a nonexistent
-//!   type selector is a semantic question, and an advisory one);
-//! - it does not check pseudo-class or attribute *names* against any list,
-//!   so `:hovr` and `[hrefff]` pass;
-//! - it does not compute specificity or matching.
+//! The reading is *syntactic*. It does not care whether `dvi` is a real
+//! element name, or whether `[hrefff]` is a real attribute.
 //!
 //! **Deliberately permissive, in two named places.** Reporting a valid
 //! selector as broken is far worse than missing a broken one — a false
 //! positive lands on somebody's real book — so:
 //!
-//! 1. **Functional pseudo arguments are not inspected.** `:not()`, `:is()`,
-//!    `:has()`, `:nth-child()` and friends take grammars of their own
-//!    (`An+B of S`, relative selectors, forgiving selector lists) that keep
-//!    growing; anything in the parentheses is accepted. The parentheses
-//!    themselves still have to balance, which the tokenizer already ensures.
-//! 2. **Unknown constructs that are merely newer than this code are
-//!    accepted** — `&` nesting, `::part()`, a pseudo name nobody has heard
-//!    of. Only shapes that no version of Selectors can produce are reported.
+//! 1. **Pseudo-classes and pseudo-elements this code does not know are
+//!    accepted**, with or without arguments: `::part()`, `:hover`, a vendor
+//!    name, a name nobody has invented yet. They come back as
+//!    [`PseudoClass::Other`] and [`PseudoElement`] with their arguments
+//!    unread. Only the ones whose grammar is fixed — `:not()`, `:is()`,
+//!    `:where()`, `:has()` and the `:nth-*()` family — have their arguments
+//!    read and checked.
+//! 2. **`:is()` and `:where()` are forgiving**, as the spec says: an argument
+//!    that is not a selector is dropped, not reported, and the count of
+//!    dropped arguments is kept so a matcher can answer "unknown" rather than
+//!    "no".
 
-use crate::parser::{ComponentValue, SyntaxError, SyntaxErrorKind};
+use std::borrow::Cow;
+
+use crate::parser::{BlockKind, ComponentValue, SyntaxError, SyntaxErrorKind};
 use crate::span::{Span, Spanned};
-use crate::token::Token;
+use crate::token::{NumericType, Token};
 
-/// Report every place a qualified rule's prelude fails to be a selector
-/// list. An empty result means "this is a selector list as far as syntax
-/// goes" — not that the selector matches anything.
+type Values<'a> = [Spanned<ComponentValue<'a>>];
+
+/// How deep selector arguments are read: `:not(:is(…))` is two. Deeper
+/// pseudo-classes come back as [`PseudoClass::Other`], unread and not
+/// reported.
 ///
-/// **At most one error per comma-separated selector.** The granularity is
-/// deliberate and sits between two wrong answers. Reporting per bad *token*
-/// turns one broken construct into a pile: a stylesheet beginning with a
-/// stray declaration, `text-indent:1.5em;`, is read as a qualified rule whose
-/// prelude is that text, and walking it token by token blamed the `:`, the
-/// `1.5em`, the `;` and the `@` of the next rule — four errors for one
-/// mistake, where a browser and epubcheck each see one. Reporting per
-/// *prelude* would be too coarse the other way: `. h-100, . y-100 { }` really
-/// is two independently broken selectors, and naming both is the thing a
-/// caller can act on.
-///
-/// Note this is not the same as stopping at the first error. Each part is
-/// still walked in full, because `validate_complex` recurses into attribute
-/// selectors and the walk is what finds them; only the *reporting* is capped.
-pub fn validate_selector_list(prelude: &[Spanned<ComponentValue<'_>>]) -> Vec<SyntaxError> {
-    validate_list(prelude, false)
+/// Reading a selector inside a pseudo-class's parentheses recurses through
+/// several functions per level, and the parser's own bound
+/// ([`MAX_NESTING_DEPTH`](crate::MAX_NESTING_DEPTH), 256) is far more than
+/// that recursion can take on a 2 MiB thread. Real stylesheets nest selector
+/// arguments two or three deep, so 32 is generous.
+pub const MAX_SELECTOR_DEPTH: usize = 32;
+
+/// A comma-separated list of complex selectors: a style rule's prelude, or
+/// the argument of `:not()`, `:is()`, `:where()`, `:has()` and `:nth-child(… of …)`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SelectorList<'a> {
+    pub selectors: Vec<Spanned<ComplexSelector<'a>>>,
 }
 
-/// [`validate_selector_list`] for a **relative** selector list (Selectors
-/// Level 4 §3.6): the prelude of a style rule nested in another style rule
-/// (CSS Nesting §2.1), where each selector may begin with a combinator —
+/// Compound selectors joined by combinators: `div > p.note`.
+///
+/// `combinators[i]` sits between `compounds[i]` and `compounds[i + 1]`, so
+/// there is always one fewer combinator than compound. The parser never
+/// builds an empty `compounds`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ComplexSelector<'a> {
+    /// The combinator a **relative** selector starts with (`> a` in a nested
+    /// rule or in `:has()`); `None` when it starts with a compound. Never set
+    /// in a selector parsed as non-relative.
+    pub leading: Option<Combinator>,
+    pub compounds: Vec<Spanned<CompoundSelector<'a>>>,
+    pub combinators: Vec<Combinator>,
+}
+
+/// How two compound selectors relate. Whitespace is [`Descendant`](Self::Descendant).
+///
+/// The column combinator `||` is not read: no browser implements it, and a
+/// prelude using it is reported as before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Combinator {
+    /// `a b`
+    Descendant,
+    /// `a > b`
+    Child,
+    /// `a + b`
+    NextSibling,
+    /// `a ~ b`
+    SubsequentSibling,
+}
+
+/// Simple selectors with nothing between them: `p.note#first:hover`.
+///
+/// In source order. The parser enforces the order Selectors requires: a type
+/// or universal selector only at the start (or after `&`, which CSS Nesting
+/// lets go first), and nothing but pseudo-classes and pseudo-elements after
+/// a pseudo-element.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompoundSelector<'a> {
+    pub simples: Vec<Spanned<SimpleSelector<'a>>>,
+}
+
+/// One simple selector. The span covers the whole of it (`ns|E`, `.note`,
+/// `[href^="x" i]`, `:not(.a)`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum SimpleSelector<'a> {
+    /// `E`, `ns|E`, `*|E`, `|E`.
+    Type(QualifiedName<'a>),
+    /// `*`, `ns|*`, `*|*`, `|*`. The namespace is `None` when no prefix was
+    /// written.
+    Universal(Option<Namespace<'a>>),
+    /// `#id`.
+    Id(Cow<'a, str>),
+    /// `.class`.
+    Class(Cow<'a, str>),
+    /// `[attr]`, `[attr="value" i]`.
+    /// Boxed: it is the largest variant by far and the rarest of the common
+    /// ones, and an unboxed one made every simple selector twice the size.
+    Attribute(Box<AttributeSelector<'a>>),
+    PseudoClass(PseudoClass<'a>),
+    PseudoElement(PseudoElement<'a>),
+    /// `&`, CSS Nesting's reference to the parent rule's selector.
+    Nesting,
+}
+
+/// A name with an optional namespace prefix, as written.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QualifiedName<'a> {
+    /// `None` when no prefix was written. For a type selector the default
+    /// namespace then applies; for an attribute, no namespace.
+    pub namespace: Option<Namespace<'a>>,
+    /// The local name and its span: the `circle` of `svg|circle`.
+    pub local: Spanned<Cow<'a, str>>,
+}
+
+/// The namespace part of a qualified name.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Namespace<'a> {
+    /// `|E`: in no namespace.
+    NoNamespace,
+    /// `*|E`: in any namespace, or none.
+    Any,
+    /// `ns|E`: the namespace that `@namespace ns …` declares. Resolving the
+    /// prefix is the caller's business.
+    Prefix(Cow<'a, str>),
+}
+
+/// `[name]`, or `[name op value flag]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AttributeSelector<'a> {
+    pub name: QualifiedName<'a>,
+    /// `None` for `[name]`, which tests presence only.
+    pub value: Option<AttributeValue<'a>>,
+}
+
+/// The `op value flag` part of an attribute selector.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AttributeValue<'a> {
+    pub operator: AttributeOperator,
+    /// The value, unquoted.
+    pub value: Cow<'a, str>,
+    pub case: AttributeCase<'a>,
+}
+
+/// The matcher in `[name op value]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttributeOperator {
+    /// `=`
+    Equal,
+    /// `~=`: one of the whitespace-separated words.
+    Includes,
+    /// `|=`: exactly, or followed by `-`.
+    DashMatch,
+    /// `^=`
+    Prefix,
+    /// `$=`
+    Suffix,
+    /// `*=`
+    Substring,
+}
+
+/// The flag after an attribute selector's value.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AttributeCase<'a> {
+    /// No flag: the document language decides.
+    Default,
+    /// `i`: ASCII case-insensitive.
+    Insensitive,
+    /// `s`: case-sensitive.
+    Sensitive,
+    /// A flag this code does not know. Accepted, since that list has grown
+    /// before.
+    Other(Cow<'a, str>),
+}
+
+/// A pseudo-class. The ones a matcher can answer from the document tree
+/// alone have variants of their own; everything else is [`Other`](Self::Other).
+#[derive(Debug, Clone, PartialEq)]
+pub enum PseudoClass<'a> {
+    Root,
+    Empty,
+    FirstChild,
+    LastChild,
+    OnlyChild,
+    FirstOfType,
+    LastOfType,
+    OnlyOfType,
+    /// `:nth-child(An+B)`, `:nth-child(An+B of S)`.
+    NthChild {
+        nth: AnB,
+        of: Option<SelectorList<'a>>,
+    },
+    NthLastChild {
+        nth: AnB,
+        of: Option<SelectorList<'a>>,
+    },
+    NthOfType(AnB),
+    NthLastOfType(AnB),
+    /// `:not(S)`.
+    Not(SelectorList<'a>),
+    /// `:is(S)`. `dropped` counts the arguments the forgiving parse left out.
+    Is {
+        selectors: SelectorList<'a>,
+        dropped: usize,
+    },
+    /// `:where(S)`, the zero-specificity `:is()`.
+    Where {
+        selectors: SelectorList<'a>,
+        dropped: usize,
+    },
+    /// `:has(S)`, with a relative selector list.
+    Has(SelectorList<'a>),
+    /// Any other pseudo-class: user-action and link states (`:hover`,
+    /// `:visited`), `:lang()`, vendor and future names. `args` is `None` for
+    /// `:name`, the unread arguments for `:name(…)`.
+    Other {
+        name: Cow<'a, str>,
+        args: Option<Vec<Spanned<ComponentValue<'a>>>>,
+    },
+}
+
+/// A pseudo-element: `::before`, `::part(label)`, and the four that CSS 2
+/// wrote with one colon (`:before`, `:after`, `:first-line`,
+/// `:first-letter`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PseudoElement<'a> {
+    pub name: Cow<'a, str>,
+    /// `None` for `::name`, the unread arguments for `::name(…)`.
+    pub args: Option<Vec<Spanned<ComponentValue<'a>>>>,
+}
+
+/// The `An+B` of `:nth-child()` and its family (CSS Syntax §7): the
+/// positions `A×n + B` for n = 0, 1, 2, …, counting from 1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnB {
+    pub a: i32,
+    pub b: i32,
+}
+
+impl AnB {
+    /// Whether the 1-based `index` is one of the positions.
+    pub fn matches(self, index: i32) -> bool {
+        let (a, b) = (i64::from(self.a), i64::from(self.b));
+        let d = i64::from(index) - b;
+        if a == 0 {
+            d == 0
+        } else {
+            d % a == 0 && d / a >= 0
+        }
+    }
+}
+
+/// A selector's specificity (Selectors Level 4 §17): ids, then classes
+/// (with attributes and pseudo-classes), then types (with pseudo-elements).
+/// The derived order compares them in that order, which is the cascade's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct Specificity {
+    pub ids: u32,
+    pub classes: u32,
+    pub types: u32,
+}
+
+impl Specificity {
+    fn add(self, other: Specificity) -> Specificity {
+        Specificity {
+            ids: self.ids.saturating_add(other.ids),
+            classes: self.classes.saturating_add(other.classes),
+            types: self.types.saturating_add(other.types),
+        }
+    }
+
+    const ID: Specificity = Specificity {
+        ids: 1,
+        classes: 0,
+        types: 0,
+    };
+    const CLASS: Specificity = Specificity {
+        ids: 0,
+        classes: 1,
+        types: 0,
+    };
+    const TYPE: Specificity = Specificity {
+        ids: 0,
+        classes: 0,
+        types: 1,
+    };
+}
+
+impl SelectorList<'_> {
+    /// The largest specificity in the list: what `:is()`, `:not()` and
+    /// `:has()` contribute. Zero for an empty list.
+    pub fn specificity(&self) -> Specificity {
+        self.selectors
+            .iter()
+            .map(|s| s.node.specificity())
+            .max()
+            .unwrap_or_default()
+    }
+}
+
+impl ComplexSelector<'_> {
+    /// This selector's specificity.
+    ///
+    /// `&` counts as zero here. Its specificity is that of the parent rule's
+    /// selector list, which this selector alone does not know.
+    pub fn specificity(&self) -> Specificity {
+        self.compounds
+            .iter()
+            .flat_map(|c| &c.node.simples)
+            .map(|s| s.node.specificity())
+            .fold(Specificity::default(), Specificity::add)
+    }
+}
+
+impl SimpleSelector<'_> {
+    pub fn specificity(&self) -> Specificity {
+        match self {
+            SimpleSelector::Type(_) | SimpleSelector::PseudoElement(_) => Specificity::TYPE,
+            SimpleSelector::Universal(_) | SimpleSelector::Nesting => Specificity::default(),
+            SimpleSelector::Id(_) => Specificity::ID,
+            SimpleSelector::Class(_) | SimpleSelector::Attribute(_) => Specificity::CLASS,
+            SimpleSelector::PseudoClass(p) => match p {
+                PseudoClass::Not(s)
+                | PseudoClass::Has(s)
+                | PseudoClass::Is { selectors: s, .. } => s.specificity(),
+                PseudoClass::Where { .. } => Specificity::default(),
+                PseudoClass::NthChild { of: Some(s), .. }
+                | PseudoClass::NthLastChild { of: Some(s), .. } => {
+                    Specificity::CLASS.add(s.specificity())
+                }
+                _ => Specificity::CLASS,
+            },
+        }
+    }
+}
+
+/// Parse a style rule's prelude as a selector list. On failure, the errors
+/// say where: **at most one per comma-separated selector**, plus one for each
+/// empty side of a comma.
+///
+/// The granularity is deliberate and sits between two wrong answers.
+/// Reporting per bad *token* turns one broken construct into a pile: a
+/// stylesheet beginning with a stray declaration, `text-indent:1.5em;`, is
+/// read as a qualified rule whose prelude is that text, and walking it token
+/// by token blamed the `:`, the `1.5em`, the `;` and the `@` of the next
+/// rule — four errors for one mistake, where a browser and epubcheck each
+/// see one. Reporting per *prelude* would be too coarse the other way:
+/// `. h-100, . y-100 { }` really is two independently broken selectors, and
+/// naming both is the thing a caller can act on.
+///
+/// A list with one bad selector is a bad list: per Selectors, the whole style
+/// rule is dropped, and so the result is `Err` even when other selectors in
+/// it parsed.
+pub fn parse_selector_list<'a>(
+    prelude: &[Spanned<ComponentValue<'a>>],
+) -> Result<SelectorList<'a>, Vec<SyntaxError>> {
+    into_result(list(prelude, false, 0))
+}
+
+/// [`parse_selector_list`] for a **relative** selector list (Selectors Level
+/// 4 §3.6): the prelude of a style rule nested in another style rule (CSS
+/// Nesting §2.1), where each selector may begin with a combinator —
 /// `p { > a { … } + b { … } }`.
-pub fn validate_relative_selector_list(
-    prelude: &[Spanned<ComponentValue<'_>>],
-) -> Vec<SyntaxError> {
-    validate_list(prelude, true)
+pub fn parse_relative_selector_list<'a>(
+    prelude: &[Spanned<ComponentValue<'a>>],
+) -> Result<SelectorList<'a>, Vec<SyntaxError>> {
+    into_result(list(prelude, true, 0))
 }
 
-fn validate_list(prelude: &[Spanned<ComponentValue<'_>>], relative: bool) -> Vec<SyntaxError> {
-    let mut errors = Vec::new();
-    // A prelude splits on top-level commas into complex selectors. An empty
-    // side (`, p`, `a,`, `a,,b`) is the one comma error worth reporting.
-    // `part_errors` only allocates when a part is actually broken.
-    let mut part_errors = Vec::new();
-    split_on_commas(prelude, &mut errors, |part, errors| {
-        validate_complex(part, relative, &mut part_errors);
-        // The earliest one: it is where the author has to start reading, and
-        // everything after it is usually this parser losing its footing
-        // rather than a second independent mistake.
-        errors.extend(part_errors.drain(..).next());
-    });
-    errors
+fn into_result<'a>(
+    (list, errors): (SelectorList<'a>, Vec<SyntaxError>),
+) -> Result<SelectorList<'a>, Vec<SyntaxError>> {
+    if errors.is_empty() {
+        Ok(list)
+    } else {
+        Err(errors)
+    }
 }
 
 /// Every **type selector** name in a qualified rule's prelude, with its span.
@@ -86,7 +404,8 @@ fn validate_list(prelude: &[Spanned<ComponentValue<'_>>], relative: bool) -> Vec
 /// A type selector is an element name written bare at the head of a compound
 /// selector — the `h4` in `h4.note`, `div` in `div > p`. Namespace-qualified
 /// forms (`svg|circle`) yield the local name; the universal selector `*`
-/// yields nothing, and neither do class, id, attribute or pseudo parts.
+/// yields nothing, and neither do class, id, attribute or pseudo parts, nor
+/// names inside `:not()` and its kin.
 ///
 /// This reports *what the selector names*, not whether the name is a real
 /// element — that judgement needs a vocabulary this crate does not have and
@@ -95,67 +414,86 @@ fn validate_list(prelude: &[Spanned<ComponentValue<'_>>], relative: bool) -> Vec
 /// document can use"; a typo for `h4` or for `.h4a` is valid CSS and matches
 /// nothing, so it is invisible without a check like that.
 ///
-/// Syntax errors are ignored here: a prelude that is not a selector list at
-/// all is `validate_selector_list`'s business, and this returns whatever
-/// names it can still see.
+/// The prelude is read as a relative list, which accepts every style rule's
+/// prelude wherever it sits. Selectors that fail to parse are skipped; the
+/// names in the others still come back.
 pub fn type_selector_names<'a>(
     prelude: &[Spanned<ComponentValue<'a>>],
-) -> Vec<Spanned<std::borrow::Cow<'a, str>>> {
-    let mut out = Vec::new();
-    let mut sink = Vec::new();
-    split_on_commas(prelude, &mut sink, |part, _| {
-        let mut expect_compound = true;
-        let mut i = 0;
-        while i < part.len() {
-            let cv = &part[i];
-            // Whitespace is the descendant combinator, so it starts a new
-            // compound just as `>` does — `h4.note em` names both `h4` and
-            // `em`, and treating whitespace as mere separation loses the
-            // second one.
-            if is_whitespace(&cv.node) || as_combinator(&cv.node).is_some() {
-                expect_compound = true;
-                i += 1;
-                continue;
-            }
-            if expect_compound && let ComponentValue::Token(Token::Ident(name)) = &cv.node {
-                // `ns|E`: the name is the tail, and the head was the prefix.
-                if matches!(
-                    part.get(i + 1).map(|c| &c.node),
-                    Some(ComponentValue::Token(Token::Delim('|')))
-                ) {
-                    if let Some(Spanned {
-                        node: ComponentValue::Token(Token::Ident(local)),
-                        span,
-                    }) = part.get(i + 2)
-                    {
-                        out.push(Spanned::new(local.clone(), *span));
-                    }
-                } else {
-                    out.push(Spanned::new(name.clone(), cv.span));
-                }
-            }
-            // Skip to the end of this compound: everything up to whitespace
-            // or a combinator belongs to the same one, and only its head can
-            // be a type selector.
-            while i < part.len()
-                && !is_whitespace(&part[i].node)
-                && as_combinator(&part[i].node).is_none()
-            {
-                i += 1;
-            }
-            expect_compound = false;
+) -> Vec<Spanned<Cow<'a, str>>> {
+    list(prelude, true, 0)
+        .0
+        .selectors
+        .into_iter()
+        .flat_map(|c| c.node.compounds)
+        .flat_map(|c| c.node.simples)
+        .filter_map(|s| match s.node {
+            SimpleSelector::Type(name) => Some(name.local),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The selectors that parsed, and the errors for those that did not.
+fn list<'a>(
+    values: &Values<'a>,
+    relative: bool,
+    depth: usize,
+) -> (SelectorList<'a>, Vec<SyntaxError>) {
+    let mut selectors = Vec::new();
+    let mut errors = Vec::new();
+    split_on_commas(values, &mut errors, |part, errors| {
+        match complex(part, relative, depth) {
+            Ok(c) => selectors.push(c),
+            Err(e) => errors.push(e),
         }
     });
-    out
+    (SelectorList { selectors }, errors)
+}
+
+/// A forgiving selector list (`:is()`, `:where()`): what parses, and how many
+/// arguments did not. Empty arguments are not counted; the spec drops them
+/// silently too.
+fn forgiving_list<'a>(values: &Values<'a>, depth: usize) -> (SelectorList<'a>, usize) {
+    let mut selectors = Vec::new();
+    let mut dropped = 0;
+    for part in values.split(|cv| matches!(cv.node, ComponentValue::Token(Token::Comma))) {
+        if is_blank(part) {
+            continue;
+        }
+        match complex(part, false, depth) {
+            Ok(c) => selectors.push(c),
+            Err(_) => dropped += 1,
+        }
+    }
+    (SelectorList { selectors }, dropped)
+}
+
+/// A non-forgiving list inside a pseudo-class's parentheses: `Err` with the
+/// earliest error, which then stands for the whole outer selector. An empty
+/// list is an error at the function itself.
+fn argument_list<'a>(
+    values: &Values<'a>,
+    relative: bool,
+    function: Span,
+    depth: usize,
+) -> Result<SelectorList<'a>, SyntaxError> {
+    let (list, errors) = list(values, relative, depth);
+    if let Some(first) = errors.into_iter().min_by_key(|e| e.span.start) {
+        return Err(first);
+    }
+    if list.selectors.is_empty() {
+        return Err(bad(function));
+    }
+    Ok(list)
 }
 
 /// The comma-separated slices of a prelude, reporting an empty one as it
 /// goes. The error span is the comma itself: it is the token the author has
 /// to look at.
 fn split_on_commas<'p, 'a>(
-    prelude: &'p [Spanned<ComponentValue<'a>>],
+    prelude: &'p Values<'a>,
     errors: &mut Vec<SyntaxError>,
-    mut each: impl FnMut(&'p [Spanned<ComponentValue<'a>>], &mut Vec<SyntaxError>),
+    mut each: impl FnMut(&'p Values<'a>, &mut Vec<SyntaxError>),
 ) {
     let mut parts = 0;
     let mut start = 0;
@@ -163,10 +501,7 @@ fn split_on_commas<'p, 'a>(
         if matches!(&cv.node, ComponentValue::Token(Token::Comma)) {
             let part = &prelude[start..i];
             if is_blank(part) {
-                errors.push(SyntaxError {
-                    span: cv.span,
-                    kind: SyntaxErrorKind::InvalidSelector,
-                });
+                errors.push(bad(cv.span));
             } else {
                 parts += 1;
                 each(part, errors);
@@ -183,311 +518,566 @@ fn split_on_commas<'p, 'a>(
         if parts > 0
             && let Some(last) = prelude.last()
         {
-            errors.push(SyntaxError {
-                span: last.span,
-                kind: SyntaxErrorKind::InvalidSelector,
-            });
+            errors.push(bad(last.span));
         }
     } else {
         each(tail, errors);
     }
 }
 
-/// A complex selector: compounds joined by combinators. Reports a combinator
-/// with nothing on one side (`> p`, `a >`, `a > > b`).
+/// A complex selector: compounds joined by combinators. `part` is not blank.
 ///
 /// In a relative selector the first thing may be a combinator, which then has
-/// the nesting parent on its left; it still needs a compound on its right.
-fn validate_complex(
-    part: &[Spanned<ComponentValue<'_>>],
+/// the nesting parent (or `:has()`'s subject) on its left; it still needs a
+/// compound on its right.
+fn complex<'a>(
+    part: &Values<'a>,
     relative: bool,
-    errors: &mut Vec<SyntaxError>,
-) {
-    let mut expect_compound = true;
-    let mut i = 0;
-    let mut saw_any = false;
+    depth: usize,
+) -> Result<Spanned<ComplexSelector<'a>>, SyntaxError> {
+    let mut i = skip_ws(part, 0);
+    let first = part[i].span;
     let mut leading = None;
-    while i < part.len() {
-        let cv = &part[i];
-        if is_whitespace(&cv.node) {
-            i += 1;
-            continue;
+    // A combinator still waiting for the compound on its right.
+    let mut pending = None;
+    if let Some(c) = combinator(&part[i].node) {
+        if !relative {
+            return Err(bad(part[i].span));
         }
-        if let Some(_c) = as_combinator(&cv.node) {
-            if relative && !saw_any && leading.is_none() {
-                leading = Some(cv.span);
-            } else if expect_compound {
-                // Nothing to combine with on the left: a leading combinator,
-                // or two in a row.
-                errors.push(SyntaxError {
-                    span: cv.span,
-                    kind: SyntaxErrorKind::InvalidSelector,
-                });
+        leading = Some(c);
+        pending = Some(part[i].span);
+        i += 1;
+    }
+    let mut compounds: Vec<Spanned<CompoundSelector<'a>>> = Vec::new();
+    let mut combinators = Vec::new();
+    loop {
+        i = skip_ws(part, i);
+        let Some(cv) = part.get(i) else { break };
+        if let Some(c) = combinator(&cv.node) {
+            // Nothing to combine with on the left: two in a row.
+            if pending.is_some() {
+                return Err(bad(cv.span));
             }
-            expect_compound = true;
+            combinators.push(c);
+            pending = Some(cv.span);
             i += 1;
             continue;
         }
-        // A compound selector: consume every simple selector that follows
-        // without intervening whitespace.
-        let consumed = validate_compound(part, i, errors);
-        debug_assert!(consumed > 0, "validate_compound must always advance");
-        i += consumed;
-        expect_compound = false;
-        saw_any = true;
+        // A compound after a compound: they were separated by whitespace,
+        // since a compound runs until whitespace or a combinator.
+        if !compounds.is_empty() && pending.is_none() {
+            combinators.push(Combinator::Descendant);
+        }
+        pending = None;
+        let (c, n) = compound(part, i, depth)?;
+        compounds.push(c);
+        i += n;
     }
     // A trailing combinator has nothing on its right.
-    if expect_compound
-        && !saw_any
-        && let Some(span) = leading
-    {
-        errors.push(SyntaxError {
-            span,
-            kind: SyntaxErrorKind::InvalidSelector,
-        });
+    if let Some(span) = pending {
+        return Err(bad(span));
     }
-    if expect_compound
-        && saw_any
-        && let Some(last) = part.iter().rev().find(|cv| !is_whitespace(&cv.node))
+    // A pseudo-element ends the selector: it can only be in the last compound.
+    if let Some((_, init)) = compounds.split_last()
+        && let Some(pe) = init
+            .iter()
+            .flat_map(|c| &c.node.simples)
+            .find(|s| matches!(s.node, SimpleSelector::PseudoElement(_)))
     {
-        errors.push(SyntaxError {
-            span: last.span,
-            kind: SyntaxErrorKind::InvalidSelector,
-        });
+        return Err(bad(pe.span));
     }
+    let last = compounds.last().map_or(first, |c| c.span);
+    Ok(Spanned::new(
+        ComplexSelector {
+            leading,
+            compounds,
+            combinators,
+        },
+        first.to(last),
+    ))
 }
 
-/// Validate one compound selector starting at `start`, returning how many
-/// component values it consumed (always at least one, so the caller can't
-/// loop forever). A compound runs until whitespace or a combinator.
-fn validate_compound(
-    part: &[Spanned<ComponentValue<'_>>],
+/// One compound selector starting at `start`, and how many component values
+/// it consumed (always at least one). A compound runs until whitespace or a
+/// combinator.
+fn compound<'a>(
+    part: &Values<'a>,
     start: usize,
-    errors: &mut Vec<SyntaxError>,
-) -> usize {
+    depth: usize,
+) -> Result<(Spanned<CompoundSelector<'a>>, usize), SyntaxError> {
+    let mut simples: Vec<Spanned<SimpleSelector<'a>>> = Vec::new();
+    let mut after_pseudo_element = false;
     let mut i = start;
-    while i < part.len() {
-        let cv = &part[i];
-        if is_whitespace(&cv.node) || as_combinator(&cv.node).is_some() {
+    while let Some(cv) = part.get(i) {
+        if is_whitespace(&cv.node) || combinator(&cv.node).is_some() {
             break;
         }
-        i += validate_simple(part, i, errors);
+        let (s, n) = simple(part, i, depth)?;
+        let in_order = match &s.node {
+            // Type and universal come first; CSS Nesting lets `&` go before.
+            SimpleSelector::Type(_) | SimpleSelector::Universal(_) => simples
+                .iter()
+                .all(|p| matches!(p.node, SimpleSelector::Nesting)),
+            SimpleSelector::PseudoClass(_) => true,
+            SimpleSelector::PseudoElement(_) => {
+                after_pseudo_element = true;
+                true
+            }
+            _ => !after_pseudo_element,
+        };
+        if !in_order {
+            return Err(bad(s.span));
+        }
+        simples.push(s);
+        i += n;
     }
-    (i - start).max(1)
+    let span = part[start].span.to(part[i - 1].span);
+    Ok((Spanned::new(CompoundSelector { simples }, span), i - start))
 }
 
-/// Validate one simple selector, returning how many component values it took.
-fn validate_simple(
-    part: &[Spanned<ComponentValue<'_>>],
+/// One simple selector at `i`, and how many component values it took.
+fn simple<'a>(
+    part: &Values<'a>,
     i: usize,
-    errors: &mut Vec<SyntaxError>,
-) -> usize {
+    depth: usize,
+) -> Result<(Spanned<SimpleSelector<'a>>, usize), SyntaxError> {
     let cv = &part[i];
+    let one = |s| Ok((Spanned::new(s, cv.span), 1));
     match &cv.node {
-        // `E`, and the `ns|E` / `ns|*` qualified forms.
-        ComponentValue::Token(Token::Ident(_)) => 1 + namespace_tail(part, i + 1, errors),
-        // `#id`.
-        ComponentValue::Token(Token::Hash { .. }) => 1,
-        // `[attr…]` — the tokenizer already balanced the brackets.
-        ComponentValue::Block(b) if b.kind == crate::parser::BlockKind::Square => {
-            validate_attribute(&b.values, cv.span, errors);
-            1
-        }
-        // `:pseudo`, `::pseudo`, `:func(…)`. The name has to be there; what
-        // it is, and what is inside a function, is not this check's business.
-        ComponentValue::Token(Token::Colon) => {
-            let mut n = 1;
-            if matches!(
-                part.get(i + 1).map(|c| &c.node),
-                Some(ComponentValue::Token(Token::Colon))
-            ) {
-                n += 1; // `::`
-            }
-            match part.get(i + n).map(|c| &c.node) {
-                Some(ComponentValue::Token(Token::Ident(_)))
-                | Some(ComponentValue::Function { .. }) => n + 1,
-                _ => {
-                    errors.push(SyntaxError {
-                        span: cv.span,
-                        kind: SyntaxErrorKind::InvalidSelector,
-                    });
-                    n
-                }
+        // `E`, `ns|E`, `ns|*`.
+        ComponentValue::Token(Token::Ident(name)) => {
+            if is_delim(part.get(i + 1), '|') {
+                let ns = Namespace::Prefix(name.clone());
+                namespaced(part, i, i + 1, ns)
+            } else {
+                one(SimpleSelector::Type(QualifiedName {
+                    namespace: None,
+                    local: Spanned::new(name.clone(), cv.span),
+                }))
             }
         }
-        ComponentValue::Token(Token::Delim(c)) => match c {
-            // `.class` — the class name must follow immediately.
-            '.' => match part.get(i + 1).map(|c| &c.node) {
-                Some(ComponentValue::Token(Token::Ident(_))) => 2,
-                _ => {
-                    errors.push(SyntaxError {
-                        span: cv.span,
-                        kind: SyntaxErrorKind::InvalidSelector,
-                    });
-                    1
-                }
-            },
-            // `*`, and `*|E`.
-            '*' => 1 + namespace_tail(part, i + 1, errors),
-            // `|E` (no namespace) — the bare form of the qualified name.
-            '|' => match part.get(i + 1).map(|c| &c.node) {
-                Some(ComponentValue::Token(Token::Ident(_) | Token::Delim('*'))) => 2,
-                _ => {
-                    errors.push(SyntaxError {
-                        span: cv.span,
-                        kind: SyntaxErrorKind::InvalidSelector,
-                    });
-                    1
-                }
-            },
-            // `&` is CSS Nesting's parent reference — newer than this code
-            // has any business objecting to.
-            '&' => 1,
-            _ => {
-                errors.push(SyntaxError {
-                    span: cv.span,
-                    kind: SyntaxErrorKind::InvalidSelector,
-                });
-                1
+        // `*`, `*|E`, `*|*`.
+        ComponentValue::Token(Token::Delim('*')) => {
+            if is_delim(part.get(i + 1), '|') {
+                namespaced(part, i, i + 1, Namespace::Any)
+            } else {
+                one(SimpleSelector::Universal(None))
             }
+        }
+        // `|E`, `|*`.
+        ComponentValue::Token(Token::Delim('|')) => namespaced(part, i, i, Namespace::NoNamespace),
+        // `#id`: the hash has to be a valid identifier, so `#1a` is not one.
+        ComponentValue::Token(Token::Hash { value, is_id: true }) => {
+            one(SimpleSelector::Id(value.clone()))
+        }
+        // `.class`: the name must follow immediately.
+        ComponentValue::Token(Token::Delim('.')) => match part.get(i + 1) {
+            Some(Spanned {
+                node: ComponentValue::Token(Token::Ident(name)),
+                span,
+            }) => Ok((
+                Spanned::new(SimpleSelector::Class(name.clone()), cv.span.to(*span)),
+                2,
+            )),
+            _ => Err(bad(cv.span)),
         },
+        // `&`, CSS Nesting's parent reference.
+        ComponentValue::Token(Token::Delim('&')) => one(SimpleSelector::Nesting),
+        // `[attr…]`: the tokenizer already balanced the brackets.
+        ComponentValue::Block(b) if b.kind == BlockKind::Square => one(SimpleSelector::Attribute(
+            Box::new(attribute(&b.values, cv.span)?),
+        )),
+        ComponentValue::Token(Token::Colon) => pseudo(part, i, depth),
         // Anything else — a number, a string, a `( … )` — cannot start a
         // simple selector.
-        _ => {
-            errors.push(SyntaxError {
-                span: cv.span,
-                kind: SyntaxErrorKind::InvalidSelector,
-            });
-            1
-        }
+        _ => Err(bad(cv.span)),
     }
 }
 
-/// After a type/universal selector, an immediately following `|` makes what
-/// came before a namespace prefix, and an ident or `*` must follow it.
-/// Returns how many extra component values were consumed.
-fn namespace_tail(
-    part: &[Spanned<ComponentValue<'_>>],
+/// The `|E` or `|*` tail of a qualified name whose `|` is at `bar`, the whole
+/// starting at `start`.
+fn namespaced<'a>(
+    part: &Values<'a>,
+    start: usize,
+    bar: usize,
+    namespace: Namespace<'a>,
+) -> Result<(Spanned<SimpleSelector<'a>>, usize), SyntaxError> {
+    let Some(name) = part.get(bar + 1) else {
+        return Err(bad(part[bar].span));
+    };
+    let s = match &name.node {
+        ComponentValue::Token(Token::Ident(local)) => SimpleSelector::Type(QualifiedName {
+            namespace: Some(namespace),
+            local: Spanned::new(local.clone(), name.span),
+        }),
+        ComponentValue::Token(Token::Delim('*')) => SimpleSelector::Universal(Some(namespace)),
+        _ => return Err(bad(part[bar].span)),
+    };
+    Ok((
+        Spanned::new(s, part[start].span.to(name.span)),
+        bar + 2 - start,
+    ))
+}
+
+/// `:name`, `::name`, `:name(…)`, `::name(…)` at `i`.
+fn pseudo<'a>(
+    part: &Values<'a>,
     i: usize,
-    errors: &mut Vec<SyntaxError>,
-) -> usize {
-    let Some(cv) = part.get(i) else { return 0 };
-    if !matches!(&cv.node, ComponentValue::Token(Token::Delim('|'))) {
-        return 0;
-    }
-    // `a |= b` can't appear here (that lives inside `[ … ]`), so a `|` at
-    // this point is always a namespace separator.
-    match part.get(i + 1).map(|c| &c.node) {
-        Some(ComponentValue::Token(Token::Ident(_) | Token::Delim('*'))) => 2,
-        _ => {
-            errors.push(SyntaxError {
-                span: cv.span,
-                kind: SyntaxErrorKind::InvalidSelector,
-            });
-            1
+    depth: usize,
+) -> Result<(Spanned<SimpleSelector<'a>>, usize), SyntaxError> {
+    let colon = part[i].span;
+    let double = matches!(
+        part.get(i + 1).map(|c| &c.node),
+        Some(ComponentValue::Token(Token::Colon))
+    );
+    let n = if double { 2 } else { 1 };
+    let Some(target) = part.get(i + n) else {
+        return Err(bad(colon));
+    };
+    let s = match (&target.node, double) {
+        (ComponentValue::Token(Token::Ident(name)), true) => {
+            SimpleSelector::PseudoElement(PseudoElement {
+                name: name.clone(),
+                args: None,
+            })
         }
+        (ComponentValue::Function { name, args }, true) => {
+            SimpleSelector::PseudoElement(PseudoElement {
+                name: name.clone(),
+                args: Some(args.clone()),
+            })
+        }
+        (ComponentValue::Token(Token::Ident(name)), false) => pseudo_class_ident(name),
+        (ComponentValue::Function { name, args }, false) => {
+            SimpleSelector::PseudoClass(pseudo_class_function(name, args, target.span, depth)?)
+        }
+        _ => return Err(bad(colon)),
+    };
+    Ok((Spanned::new(s, colon.to(target.span)), n + 1))
+}
+
+/// `:name`. The four CSS 2 pseudo-elements are pseudo-elements still.
+fn pseudo_class_ident<'a>(name: &Cow<'a, str>) -> SimpleSelector<'a> {
+    let is = |s: &str| name.eq_ignore_ascii_case(s);
+    if is("before") || is("after") || is("first-line") || is("first-letter") {
+        return SimpleSelector::PseudoElement(PseudoElement {
+            name: name.clone(),
+            args: None,
+        });
     }
+    SimpleSelector::PseudoClass(if is("root") {
+        PseudoClass::Root
+    } else if is("empty") {
+        PseudoClass::Empty
+    } else if is("first-child") {
+        PseudoClass::FirstChild
+    } else if is("last-child") {
+        PseudoClass::LastChild
+    } else if is("only-child") {
+        PseudoClass::OnlyChild
+    } else if is("first-of-type") {
+        PseudoClass::FirstOfType
+    } else if is("last-of-type") {
+        PseudoClass::LastOfType
+    } else if is("only-of-type") {
+        PseudoClass::OnlyOfType
+    } else {
+        PseudoClass::Other {
+            name: name.clone(),
+            args: None,
+        }
+    })
+}
+
+/// `:name(…)`. Only the pseudo-classes whose argument grammar is fixed are
+/// read; any other comes back with its arguments as written.
+fn pseudo_class_function<'a>(
+    name: &Cow<'a, str>,
+    args: &Values<'a>,
+    span: Span,
+    depth: usize,
+) -> Result<PseudoClass<'a>, SyntaxError> {
+    let is = |s: &str| name.eq_ignore_ascii_case(s);
+    let inner = depth + 1;
+    Ok(if inner > MAX_SELECTOR_DEPTH {
+        PseudoClass::Other {
+            name: name.clone(),
+            args: Some(args.to_vec()),
+        }
+    } else if is("not") {
+        PseudoClass::Not(argument_list(args, false, span, inner)?)
+    } else if is("is") {
+        let (selectors, dropped) = forgiving_list(args, inner);
+        PseudoClass::Is { selectors, dropped }
+    } else if is("where") {
+        let (selectors, dropped) = forgiving_list(args, inner);
+        PseudoClass::Where { selectors, dropped }
+    } else if is("has") {
+        PseudoClass::Has(argument_list(args, true, span, inner)?)
+    } else if is("nth-child") || is("nth-last-child") {
+        // `An+B of S`: An+B never contains the ident `of`, so the first one
+        // is the separator.
+        let of = args.iter().position(
+            |cv| matches!(&cv.node, ComponentValue::Token(Token::Ident(w)) if w.eq_ignore_ascii_case("of")),
+        );
+        let (nth, of) = match of {
+            Some(k) => (
+                &args[..k],
+                Some(argument_list(&args[k + 1..], false, span, inner)?),
+            ),
+            None => (args, None),
+        };
+        let nth = an_plus_b(nth).ok_or_else(|| bad(span))?;
+        if is("nth-child") {
+            PseudoClass::NthChild { nth, of }
+        } else {
+            PseudoClass::NthLastChild { nth, of }
+        }
+    } else if is("nth-of-type") {
+        PseudoClass::NthOfType(an_plus_b(args).ok_or_else(|| bad(span))?)
+    } else if is("nth-last-of-type") {
+        PseudoClass::NthLastOfType(an_plus_b(args).ok_or_else(|| bad(span))?)
+    } else {
+        PseudoClass::Other {
+            name: name.clone(),
+            args: Some(args.to_vec()),
+        }
+    })
 }
 
 /// The inside of an `[ … ]` attribute selector: a (possibly
 /// namespace-qualified) name, optionally followed by a matcher and a value,
 /// optionally followed by a case-sensitivity flag.
-fn validate_attribute(
-    values: &[Spanned<ComponentValue<'_>>],
-    bracket_span: Span,
-    errors: &mut Vec<SyntaxError>,
-) {
+fn attribute<'a>(values: &Values<'a>, bracket: Span) -> Result<AttributeSelector<'a>, SyntaxError> {
     // Index-based over the non-whitespace values: `[ns|href]` needs one
     // token of lookahead to tell a namespace separator from the `|=` matcher,
     // and that reads badly through an iterator.
-    let v: Vec<&Spanned<ComponentValue<'_>>> = values
+    let v: Vec<&Spanned<ComponentValue<'a>>> = values
         .iter()
         .filter(|cv| !is_whitespace(&cv.node))
         .collect();
-    let bad = |errors: &mut Vec<SyntaxError>, span: Span| {
-        errors.push(SyntaxError {
-            span,
-            kind: SyntaxErrorKind::InvalidSelector,
-        });
+    let ident = |k: usize| match v.get(k).map(|c| &c.node) {
+        Some(ComponentValue::Token(Token::Ident(n))) => Some(Spanned::new(n.clone(), v[k].span)),
+        _ => None,
     };
-    if v.is_empty() {
+    let delim = |k: usize, c: char| matches!(v.get(k).map(|v| &v.node), Some(ComponentValue::Token(Token::Delim(d))) if *d == c);
+    let Some(first) = v.first() else {
         // `[]`
-        bad(errors, bracket_span);
-        return;
-    }
-
-    // The attribute name: `href`, `ns|href`, `*|href`, `|href`.
-    let mut i = 0;
-    let name_ok = match &v[i].node {
-        ComponentValue::Token(Token::Ident(_)) => {
-            i += 1;
-            // A `|` here is a namespace separator only when a name follows
-            // it; `[a|="x"]` is the dash-match matcher, not a namespace.
-            if is_delim(v.get(i), '|')
-                && matches!(
-                    v.get(i + 1).map(|c| &c.node),
-                    Some(ComponentValue::Token(Token::Ident(_)))
-                )
-            {
-                i += 2;
-            }
-            true
-        }
-        // `*|href` and `|href` - the prefix carries no name of its own.
-        ComponentValue::Token(Token::Delim('*')) if is_delim(v.get(i + 1), '|') => {
-            i += 2;
-            let ok = matches!(
-                v.get(i).map(|c| &c.node),
-                Some(ComponentValue::Token(Token::Ident(_)))
-            );
-            i += usize::from(ok);
-            ok
-        }
-        ComponentValue::Token(Token::Delim('|')) => {
-            i += 1;
-            let ok = matches!(
-                v.get(i).map(|c| &c.node),
-                Some(ComponentValue::Token(Token::Ident(_)))
-            );
-            i += usize::from(ok);
-            ok
-        }
-        _ => false,
+        return Err(bad(bracket));
     };
-    if !name_ok {
-        bad(errors, v[0].span);
-        return;
-    }
+
+    // The attribute name: `href`, `ns|href`, `*|href`, `|href`. A `|` after
+    // a name is a namespace separator only when a name follows it;
+    // `[a|="x"]` is the dash-match matcher.
+    let (namespace, local, mut i) = if let Some(n) = ident(0) {
+        match (delim(1, '|'), ident(2)) {
+            (true, Some(local)) => (Some(Namespace::Prefix(n.node)), local, 3),
+            _ => (None, n, 1),
+        }
+    } else if delim(0, '*') && delim(1, '|') {
+        (Some(Namespace::Any), ident(2).ok_or(bad(first.span))?, 3)
+    } else if delim(0, '|') {
+        (
+            Some(Namespace::NoNamespace),
+            ident(1).ok_or(bad(first.span))?,
+            2,
+        )
+    } else {
+        return Err(bad(first.span));
+    };
+    let name = QualifiedName { namespace, local };
 
     // Bare `[href]` is complete.
-    let Some(matcher) = v.get(i) else { return };
+    let Some(matcher) = v.get(i) else {
+        return Ok(AttributeSelector { name, value: None });
+    };
 
     // A matcher is `=` alone, or one of ~ | ^ $ * immediately followed by `=`.
-    let matcher_len = match &matcher.node {
-        ComponentValue::Token(Token::Delim('=')) => 1,
-        ComponentValue::Token(Token::Delim('~' | '|' | '^' | '$' | '*'))
-            if is_delim(v.get(i + 1), '=') =>
+    let operator = match &matcher.node {
+        ComponentValue::Token(Token::Delim('=')) => AttributeOperator::Equal,
+        ComponentValue::Token(Token::Delim(c @ ('~' | '|' | '^' | '$' | '*')))
+            if delim(i + 1, '=') =>
         {
-            2
+            i += 1;
+            match c {
+                '~' => AttributeOperator::Includes,
+                '|' => AttributeOperator::DashMatch,
+                '^' => AttributeOperator::Prefix,
+                '$' => AttributeOperator::Suffix,
+                _ => AttributeOperator::Substring,
+            }
         }
-        _ => {
-            bad(errors, matcher.span);
-            return;
-        }
+        _ => return Err(bad(matcher.span)),
     };
-    i += matcher_len;
+    i += 1;
 
     // A value must follow: `[href=]` is the classic mistake.
-    match v.get(i).map(|c| (&c.node, c.span)) {
-        Some((ComponentValue::Token(Token::Ident(_) | Token::String(_)), _)) => {}
-        Some((_, span)) => bad(errors, span),
-        None => bad(errors, matcher.span),
-    }
-    // Anything after the value is a flag (`i`, `s`) - accepted without
-    // checking which letter, since that list has grown before.
+    let value = match v.get(i).map(|c| &c.node) {
+        Some(ComponentValue::Token(Token::Ident(s) | Token::String(s))) => s.clone(),
+        Some(_) => return Err(bad(v[i].span)),
+        None => return Err(bad(matcher.span)),
+    };
+    i += 1;
+
+    // At most one flag, an ident. Which letter is not checked: that list has
+    // grown before.
+    let case = match v.get(i) {
+        None => AttributeCase::Default,
+        Some(_) if i + 1 < v.len() => return Err(bad(v[i + 1].span)),
+        Some(_) => match ident(i) {
+            Some(f) if f.node.eq_ignore_ascii_case("i") => AttributeCase::Insensitive,
+            Some(f) if f.node.eq_ignore_ascii_case("s") => AttributeCase::Sensitive,
+            Some(f) => AttributeCase::Other(f.node),
+            None => return Err(bad(v[i].span)),
+        },
+    };
+    Ok(AttributeSelector {
+        name,
+        value: Some(AttributeValue {
+            operator,
+            value,
+            case,
+        }),
+    })
 }
 
-fn is_delim(cv: Option<&&Spanned<ComponentValue<'_>>>, c: char) -> bool {
+/// `An+B` (CSS Syntax §7.2) from a function's arguments, or `None` if they
+/// are not one.
+///
+/// The grammar is written against tokens, because the tokenizer splits
+/// `2n+1` as the dimension `2n` and the number `+1`, `2n-1` as the single
+/// dimension `2n-1`, and `-n-1` as one ident. Whitespace is allowed around
+/// the sign in `2n + 1`, and nowhere inside a token's worth.
+fn an_plus_b(args: &Values<'_>) -> Option<AnB> {
+    let toks: Vec<&ComponentValue<'_>> = args
+        .iter()
+        .map(|cv| &cv.node)
+        .filter(|cv| !is_whitespace(cv))
+        .collect();
+    let first = toks.first()?;
+    // A `+` directly before `n…`. `+ n` has whitespace between, and then the
+    // `+` is followed by a whitespace token rather than the ident.
+    let plus_ident = match (
+        first,
+        args.iter().map(|cv| &cv.node).nth(skip_ws(args, 0) + 1),
+    ) {
+        (
+            ComponentValue::Token(Token::Delim('+')),
+            Some(ComponentValue::Token(Token::Ident(s))),
+        ) if !s.starts_with('-') => Some(s),
+        _ => None,
+    };
+    let (a, tail, rest) = match (first, plus_ident) {
+        (_, Some(s)) => {
+            let (a, tail) = n_ident(s)?;
+            (a, tail, &toks[2..])
+        }
+        (
+            ComponentValue::Token(Token::Number {
+                value,
+                num_type: NumericType::Integer,
+                ..
+            }),
+            _,
+        ) => {
+            return (toks.len() == 1).then_some(AnB {
+                a: 0,
+                b: *value as i32,
+            });
+        }
+        (ComponentValue::Token(Token::Ident(s)), _) => {
+            if toks.len() == 1 && s.eq_ignore_ascii_case("odd") {
+                return Some(AnB { a: 2, b: 1 });
+            }
+            if toks.len() == 1 && s.eq_ignore_ascii_case("even") {
+                return Some(AnB { a: 2, b: 0 });
+            }
+            let (a, tail) = n_ident(s)?;
+            (a, tail, &toks[1..])
+        }
+        (
+            ComponentValue::Token(Token::Dimension {
+                value,
+                num_type: NumericType::Integer,
+                unit,
+                ..
+            }),
+            _,
+        ) => {
+            let tail = strip_prefix_ignore_case(unit, "n")?;
+            (*value as i32, tail, &toks[1..])
+        }
+        _ => return None,
+    };
+    let b = match (tail, rest) {
+        // `2n`, `n`, `-n`.
+        ("", []) => 0,
+        // `2n +1`, `n -1`: a signed integer.
+        (
+            "",
+            [
+                ComponentValue::Token(Token::Number {
+                    value,
+                    num_type: NumericType::Integer,
+                    repr,
+                }),
+            ],
+        ) if repr.starts_with(['+', '-']) => *value as i32,
+        // `2n + 1`, `n - 1`: a sign, then a signless integer.
+        ("", [ComponentValue::Token(Token::Delim(sign @ ('+' | '-'))), n]) => {
+            let v = signless(n)?;
+            if *sign == '-' { -v } else { v }
+        }
+        // `2n- 1`, `n- 1`.
+        ("-", [n]) => -signless(n)?,
+        // `2n-1`, `n-1`, `-n-1`: all one token.
+        (digits, []) => {
+            let d = digits.strip_prefix('-')?;
+            if d.is_empty() || !d.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            d.parse::<i64>()
+                .map_or(i32::MIN, |v| i32::try_from(-v).unwrap_or(i32::MIN))
+        }
+        _ => return None,
+    };
+    Some(AnB { a, b })
+}
+
+/// `n…` or `-n…`: A, and what follows the `n`.
+fn n_ident(s: &str) -> Option<(i32, &str)> {
+    match strip_prefix_ignore_case(s, "-n") {
+        Some(tail) => Some((-1, tail)),
+        None => Some((1, strip_prefix_ignore_case(s, "n")?)),
+    }
+}
+
+/// An integer written without a sign.
+fn signless(cv: &ComponentValue<'_>) -> Option<i32> {
+    match cv {
+        ComponentValue::Token(Token::Number {
+            value,
+            num_type: NumericType::Integer,
+            repr,
+        }) if !repr.starts_with(['+', '-']) => Some(*value as i32),
+        _ => None,
+    }
+}
+
+fn strip_prefix_ignore_case<'s>(s: &'s str, prefix: &str) -> Option<&'s str> {
+    let head = s.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix)
+        .then(|| &s[prefix.len()..])
+}
+
+fn bad(span: Span) -> SyntaxError {
+    SyntaxError {
+        span,
+        kind: SyntaxErrorKind::InvalidSelector,
+    }
+}
+
+fn is_delim(cv: Option<&Spanned<ComponentValue<'_>>>, c: char) -> bool {
     matches!(cv.map(|v| &v.node), Some(ComponentValue::Token(Token::Delim(d))) if *d == c)
 }
 
@@ -495,21 +1085,31 @@ fn is_whitespace(cv: &ComponentValue<'_>) -> bool {
     matches!(cv, ComponentValue::Token(Token::Whitespace))
 }
 
-fn is_blank(part: &[Spanned<ComponentValue<'_>>]) -> bool {
+fn is_blank(part: &Values<'_>) -> bool {
     part.iter().all(|cv| is_whitespace(&cv.node))
 }
 
-/// `>`, `+`, `~` and `||`. Descendant combination is plain whitespace and is
-/// handled by the compound loop, not here.
-fn as_combinator(cv: &ComponentValue<'_>) -> Option<char> {
+fn skip_ws(part: &Values<'_>, mut i: usize) -> usize {
+    while part.get(i).is_some_and(|cv| is_whitespace(&cv.node)) {
+        i += 1;
+    }
+    i
+}
+
+/// `>`, `+` and `~`. Descendant combination is plain whitespace and is
+/// handled by the complex-selector loop, not here.
+fn combinator(cv: &ComponentValue<'_>) -> Option<Combinator> {
     match cv {
-        ComponentValue::Token(Token::Delim(c @ ('>' | '+' | '~'))) => Some(*c),
+        ComponentValue::Token(Token::Delim('>')) => Some(Combinator::Child),
+        ComponentValue::Token(Token::Delim('+')) => Some(Combinator::NextSibling),
+        ComponentValue::Token(Token::Delim('~')) => Some(Combinator::SubsequentSibling),
         _ => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::parser::{SyntaxErrorKind, syntax_errors};
 
     /// Every selector error the module reports, for one stylesheet.
@@ -520,10 +1120,21 @@ mod tests {
             .count()
     }
 
-    /// The half that matters. A false positive here lands on somebody's real
-    /// book, so this list is deliberately long and deliberately includes
-    /// selectors newer than this parser: the rule is that anything we don't
-    /// understand is *accepted*, not reported.
+    /// The first rule's prelude, parsed as a selector list.
+    fn parse(selector: &str) -> SelectorList<'static> {
+        let css: &'static str = Box::leak(format!("{selector} {{}}").into_boxed_str());
+        let (sheet, _) = crate::parse_stylesheet(css);
+        let crate::Rule::Qualified(q) = &sheet.rules[0].node else {
+            panic!("not a qualified rule: {selector}");
+        };
+        parse_selector_list(&q.prelude).unwrap_or_else(|e| panic!("{selector}: {e:?}"))
+    }
+
+    fn spec(selector: &str) -> (u32, u32, u32) {
+        let s = parse(selector).specificity();
+        (s.ids, s.classes, s.types)
+    }
+
     fn type_names(css: &str) -> Vec<String> {
         let (sheet, _) = crate::parse_stylesheet(css);
         let mut out = Vec::new();
@@ -557,6 +1168,228 @@ mod tests {
         assert_eq!(type_names(":root{color:red}"), Vec::<String>::new());
         // The head only: `p.a.b` names `p` once, not its classes.
         assert_eq!(type_names("p.a.b{color:red}"), ["p"]);
+        // A broken selector is skipped; its neighbour still counts.
+        assert_eq!(type_names("h4a, . x{color:red}"), ["h4a"]);
+    }
+
+    /// The tree for one everyday selector, node by node.
+    #[test]
+    fn the_tree_has_compounds_combinators_and_simples() {
+        let list = parse("div > p.note + a[href^=\"http\" i]:hover");
+        let c = &list.selectors[0].node;
+        assert_eq!(c.leading, None);
+        assert_eq!(c.combinators, [Combinator::Child, Combinator::NextSibling]);
+        let simples: Vec<_> = c.compounds.iter().map(|c| c.node.simples.len()).collect();
+        assert_eq!(simples, [1, 2, 3]);
+        let a = &c.compounds[2].node.simples;
+        let SimpleSelector::Attribute(attr) = &a[1].node else {
+            panic!("{:?}", a[1].node)
+        };
+        assert_eq!(attr.name.local.node, "href");
+        let v = attr.value.as_ref().unwrap();
+        assert_eq!(v.operator, AttributeOperator::Prefix);
+        assert_eq!(v.value, "http");
+        assert_eq!(v.case, AttributeCase::Insensitive);
+        assert!(matches!(
+            &a[2].node,
+            SimpleSelector::PseudoClass(PseudoClass::Other { name, args: None }) if name == "hover"
+        ));
+    }
+
+    #[test]
+    fn whitespace_is_a_descendant_combinator_and_nothing_more() {
+        let list = parse("  ul   li  ,  ol>li ");
+        assert_eq!(list.selectors.len(), 2);
+        assert_eq!(list.selectors[0].node.combinators, [Combinator::Descendant]);
+        // Whitespace around an explicit combinator is not a second one.
+        let list = parse("ol > li");
+        assert_eq!(list.selectors[0].node.combinators, [Combinator::Child]);
+    }
+
+    #[test]
+    fn spans_cover_the_selector_as_written() {
+        let css = "h1,  ul li.x , p {}";
+        let (sheet, _) = crate::parse_stylesheet(css);
+        let list = parse_selector_list(sheet.rules[0].node.prelude()).unwrap();
+        let spans: Vec<_> = list.selectors.iter().map(|s| s.span.slice(css)).collect();
+        assert_eq!(spans, ["h1", "ul li.x", "p"]);
+        let c = &list.selectors[1].node.compounds[1];
+        assert_eq!(c.span.slice(css), "li.x");
+        assert_eq!(c.node.simples[1].span.slice(css), ".x");
+    }
+
+    #[test]
+    fn namespaces_are_kept_as_written() {
+        let list = parse("svg|rect, *|a, |b, ns|*, [xlink|href]");
+        let heads: Vec<_> = list
+            .selectors
+            .iter()
+            .map(|s| s.node.compounds[0].node.simples[0].node.clone())
+            .collect();
+        assert!(matches!(&heads[0], SimpleSelector::Type(QualifiedName {
+            namespace: Some(Namespace::Prefix(p)), local }) if p == "svg" && local.node == "rect"));
+        assert!(matches!(
+            &heads[1],
+            SimpleSelector::Type(QualifiedName {
+                namespace: Some(Namespace::Any),
+                ..
+            })
+        ));
+        assert!(matches!(
+            &heads[2],
+            SimpleSelector::Type(QualifiedName {
+                namespace: Some(Namespace::NoNamespace),
+                ..
+            })
+        ));
+        assert!(
+            matches!(&heads[3], SimpleSelector::Universal(Some(Namespace::Prefix(p))) if p == "ns")
+        );
+        let SimpleSelector::Attribute(attr) = &heads[4] else {
+            panic!("{:?}", heads[4])
+        };
+        assert!(
+            matches!(&attr.name.namespace, Some(Namespace::Prefix(p)) if p == "xlink")
+                && attr.value.is_none()
+        );
+    }
+
+    #[test]
+    fn legacy_single_colon_pseudo_elements_are_pseudo_elements() {
+        for s in ["p:before", "p:after", "p:first-line", "p:FIRST-LETTER"] {
+            let list = parse(s);
+            assert!(
+                matches!(
+                    list.selectors[0].node.compounds[0].node.simples[1].node,
+                    SimpleSelector::PseudoElement(_)
+                ),
+                "{s}"
+            );
+            assert_eq!(spec(s), (0, 0, 2), "{s}");
+        }
+    }
+
+    /// Selectors Level 4 §17's own examples, and the functional
+    /// pseudo-classes whose specificity is not one class.
+    #[test]
+    fn specificity_follows_the_spec() {
+        for (s, want) in [
+            ("*", (0, 0, 0)),
+            ("li", (0, 0, 1)),
+            ("ul li", (0, 0, 2)),
+            ("ul ol+li", (0, 0, 3)),
+            ("h1 + *[rel=up]", (0, 1, 1)),
+            ("ul ol li.red", (0, 1, 3)),
+            ("li.red.level", (0, 2, 1)),
+            ("#x34y", (1, 0, 0)),
+            ("#s12:not(FOO)", (1, 0, 1)),
+            (".foo :is(.bar, #baz)", (1, 1, 0)),
+            ("a:hover", (0, 1, 1)),
+            ("p::first-line", (0, 0, 2)),
+            (":where(#a, .b) p", (0, 0, 1)),
+            ("li:nth-child(2n+1)", (0, 1, 1)),
+            ("li:nth-child(2n of .a, #b)", (1, 1, 1)),
+            ("a:has(> img, #x)", (1, 0, 1)),
+            ("& .x", (0, 1, 0)),
+        ] {
+            assert_eq!(spec(s), want, "{s}");
+        }
+        // The list's specificity is its largest member's.
+        assert_eq!(spec("p, #a, .b"), (1, 0, 0));
+        // The derived order is the cascade's: one id beats any classes.
+        let one_id = Specificity {
+            ids: 1,
+            classes: 0,
+            types: 0,
+        };
+        let many_classes = Specificity {
+            ids: 0,
+            classes: 99,
+            types: 99,
+        };
+        assert!(one_id > many_classes);
+    }
+
+    fn nth(args: &str) -> Option<AnB> {
+        let css: &'static str = Box::leak(format!("x{{a:f({args})}}").into_boxed_str());
+        let (sheet, _) = crate::parse_stylesheet(css);
+        let items = &sheet.rules[0].node.block().unwrap().node;
+        let crate::BlockItem::Declaration(d) = &items[0] else {
+            panic!()
+        };
+        let ComponentValue::Function { args, .. } = &d.node.value[0].node else {
+            panic!()
+        };
+        an_plus_b(args)
+    }
+
+    /// Every production of CSS Syntax §7.2, and its near misses.
+    #[test]
+    fn an_plus_b_reads_every_form() {
+        for (s, a, b) in [
+            ("odd", 2, 1),
+            ("EVEN", 2, 0),
+            ("3", 0, 3),
+            ("-3", 0, -3),
+            ("+3", 0, 3),
+            ("n", 1, 0),
+            ("N", 1, 0),
+            ("-n", -1, 0),
+            ("+n", 1, 0),
+            ("2n", 2, 0),
+            ("2n+1", 2, 1),
+            ("2n + 1", 2, 1),
+            ("2n +1", 2, 1),
+            ("2n+ 1", 2, 1),
+            ("2n-1", 2, -1),
+            ("2n- 1", 2, -1),
+            ("2n -1", 2, -1),
+            ("2n - 1", 2, -1),
+            ("-n+3", -1, 3),
+            ("-n-3", -1, -3),
+            ("n-3", 1, -3),
+            ("+n-3", 1, -3),
+            ("+n- 3", 1, -3),
+            ("-n- 3", -1, -3),
+            ("0n+0", 0, 0),
+            (" 3n ", 3, 0),
+        ] {
+            assert_eq!(nth(s), Some(AnB { a, b }), "{s}");
+        }
+        for s in [
+            "", "+ n", "+ 3", "1.5n", "2.0", "3n+", "3n + -1", "3n - +1", "n- -1", "2n-1-", "n 1",
+            "x", "odd 1", "-n-", "2n -1 1", "--n",
+        ] {
+            assert_eq!(nth(s), None, "must be rejected: {s:?}");
+        }
+    }
+
+    #[test]
+    fn an_plus_b_positions() {
+        let odd = AnB { a: 2, b: 1 };
+        assert!(odd.matches(1) && !odd.matches(2) && odd.matches(3));
+        let first3 = AnB { a: -1, b: 3 };
+        assert!(first3.matches(1) && first3.matches(3) && !first3.matches(4));
+        let third = AnB { a: 0, b: 3 };
+        assert!(third.matches(3) && !third.matches(6));
+        let from5 = AnB { a: 1, b: 5 };
+        assert!(!from5.matches(4) && from5.matches(5) && from5.matches(50));
+        let never = AnB { a: -2, b: -1 };
+        assert!((1..100).all(|i| !never.matches(i)));
+    }
+
+    #[test]
+    fn forgiving_lists_drop_what_does_not_parse() {
+        let list = parse(":is(.a, > b, , .c)");
+        let SimpleSelector::PseudoClass(PseudoClass::Is { selectors, dropped }) =
+            &list.selectors[0].node.compounds[0].node.simples[0].node
+        else {
+            panic!()
+        };
+        assert_eq!(selectors.selectors.len(), 2);
+        assert_eq!(*dropped, 1);
+        assert_eq!(sel_errors(":where(. x) { color: red }"), 0);
+        assert_eq!(sel_errors(":is() { color: red }"), 0);
     }
 
     #[test]
@@ -584,6 +1417,9 @@ mod tests {
             "a[lang|=\"en\"] { color: red }",
             "a[class~=\"c\"] { color: red }",
             "a[href=\"x\" i] { color: red }",
+            "a[href=\"x\" s] { color: red }",
+            "a[href=\"x\" q] { color: red }",
+            "a[ href = \"x\" ] { color: red }",
             // Namespaces.
             "ns|E { color: red }",
             "*|E { color: red }",
@@ -591,22 +1427,34 @@ mod tests {
             "ns|* { color: red }",
             "[ns|href] { color: red }",
             "[*|href] { color: red }",
+            "[|href] { color: red }",
             // Pseudo-classes and -elements, including names we don't know.
             "a:hover { color: red }",
             "p::first-line { color: red }",
+            "p:first-letter { color: red }",
+            "a:hover::before { color: red }",
+            "p::before:hover { color: red }",
             "li:nth-child(2n+1) { color: red }",
+            "li:nth-of-type(odd) { color: red }",
+            "li:nth-last-child(-n+3) { color: red }",
             "p:not(.c) { color: red }",
+            "p:not(.a, .b > c) { color: red }",
             "p:is(h1, h2) { color: red }",
             "p:where(.a, .b) { color: red }",
             "a:has(> img) { color: red }",
+            "a:has(+ b, ~ c, d) { color: red }",
             "p:lang(ja) { color: red }",
+            "p:lang(\"*-CH\") { color: red }",
             ":root { color: red }",
             // Deliberately newer / unknown than this code: must be accepted.
             "::part(label) { color: red }",
             "li:nth-child(2n+1 of .c) { color: red }",
             "input::-webkit-search-cancel-button { color: red }",
             "p:future-pseudo-nobody-invented-yet { color: red }",
+            "p:future-function(1 2 3 ? !) { color: red }",
             "& .c { color: red }",
+            "&.c { color: red }",
+            "&div { color: red }",
             "a:not(:has(> .x)) { color: red }",
         ] {
             assert_eq!(sel_errors(css), 0, "must be accepted: {css}");
@@ -636,12 +1484,41 @@ mod tests {
             "[=x] { color: red }",
             "[href=] { color: red }",
             "[href~] { color: red }",
+            "[*|] { color: red }",
+            "[href=x i s] { color: red }",
+            "[href=x 1] { color: red }",
             // A token that cannot start a simple selector.
             "\"str\" { color: red }",
             "42 { color: red }",
+            // An id has to be an identifier.
+            "#1a { color: red }",
+            // Order inside a compound.
+            ".adiv* { color: red }",
+            "[x]p { color: red }",
+            "p::before.x { color: red }",
+            "p::before span { color: red }",
+            // Arguments with a fixed grammar are read.
+            "p:not() { color: red }",
+            "p:not(. a) { color: red }",
+            "p:not(> a) { color: red }",
+            "a:has() { color: red }",
+            "a:has(. x) { color: red }",
+            "li:nth-child(foo) { color: red }",
+            "li:nth-child() { color: red }",
+            "li:nth-child(2n of) { color: red }",
+            "li:nth-of-type(1.5) { color: red }",
         ] {
             assert!(sel_errors(css) > 0, "must be reported: {css}");
         }
+    }
+
+    /// `.a div` is a class then a descendant `div`, which is fine; the bad
+    /// shape is a type selector glued after something else.
+    #[test]
+    fn a_type_selector_after_whitespace_is_a_new_compound() {
+        assert_eq!(sel_errors(".a div { color: red }"), 0);
+        assert_eq!(sel_errors("[x] p { color: red }"), 0);
+        assert_eq!(sel_errors("[x]p { color: red }"), 1);
     }
 
     /// The error has to point somewhere useful, not at the whole sheet.
@@ -655,6 +1532,11 @@ mod tests {
         assert_eq!(errs.len(), 1);
         assert_eq!(errs[0].span.slice(css), ">");
         assert_eq!(errs[0].span.start_line_col(css), (1, 6));
+        // Inside `:not()`, the error is the inner one.
+        let css = "p:not(a > > b) { color: red }";
+        let errs = syntax_errors(css);
+        assert_eq!(errs.len(), 1);
+        assert_eq!(errs[0].span.start, 10);
     }
 
     /// A UTF-8 BOM ahead of the stylesheet is a byte-order mark, not
@@ -717,11 +1599,48 @@ mod tests {
         assert_eq!(sel_errors("p, . q { color: red }"), 1);
     }
 
-    /// Capping the *reporting* must not cap the *walk*: `validate_complex`
-    /// recurses into attribute selectors, and stopping early would stop
-    /// finding them. Two bad attribute selectors in two parts is two errors.
+    /// Each part is read on its own: two bad attribute selectors in two
+    /// parts is two errors.
     #[test]
-    fn the_walk_still_descends_after_the_first_report() {
+    fn every_part_is_read() {
         assert_eq!(sel_errors("a[=x], b[=y] { color: red }"), 2);
+    }
+
+    /// Past [`MAX_SELECTOR_DEPTH`] arguments are kept unread, not reported
+    /// and not recursed into: `:is()` 300 deep parses on a test thread.
+    #[test]
+    fn deep_selector_arguments_are_kept_unread() {
+        let deep = format!("{}a{}", ":is(".repeat(300), ")".repeat(300));
+        assert_eq!(sel_errors(&format!("{deep} {{ color: red }}")), 0);
+        // `MAX_SELECTOR_DEPTH` levels are read; the one below is `Other`.
+        let n = MAX_SELECTOR_DEPTH + 1;
+        let list = parse(&format!("{}a{}", ":not(".repeat(n), ")".repeat(n)));
+        let mut levels = 0;
+        let mut node = &list.selectors[0].node.compounds[0].node.simples[0].node;
+        while let SimpleSelector::PseudoClass(PseudoClass::Not(inner)) = node {
+            levels += 1;
+            node = &inner.selectors[0].node.compounds[0].node.simples[0].node;
+        }
+        assert_eq!(levels, MAX_SELECTOR_DEPTH);
+        assert!(matches!(
+            node,
+            SimpleSelector::PseudoClass(PseudoClass::Other { .. })
+        ));
+    }
+
+    #[test]
+    fn relative_selectors_only_where_relative() {
+        let (sheet, errs) = crate::parse_stylesheet("p { > a { } + b { } ~ c { } }");
+        assert!(errs.is_empty(), "{errs:?}");
+        let crate::Rule::Qualified(q) = &sheet.rules[0].node else {
+            panic!()
+        };
+        let crate::BlockItem::Rule(r) = &q.block.node[0] else {
+            panic!()
+        };
+        let list = parse_relative_selector_list(r.node.prelude()).unwrap();
+        assert_eq!(list.selectors[0].node.leading, Some(Combinator::Child));
+        assert!(parse_selector_list(r.node.prelude()).is_err());
+        assert_eq!(sel_errors("p { > { } }"), 1, "a lone combinator");
     }
 }

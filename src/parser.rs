@@ -588,12 +588,16 @@ impl<'a> Parser<'a> {
         let prelude = self.values_until(brace);
         if self.report {
             match ctx {
-                Context::Style => self
-                    .errors
-                    .extend(crate::selector::validate_selector_list(&prelude)),
-                Context::Nested => self
-                    .errors
-                    .extend(crate::selector::validate_relative_selector_list(&prelude)),
+                Context::Style => {
+                    if let Err(e) = crate::selector::parse_selector_list(&prelude) {
+                        self.errors.extend(e);
+                    }
+                }
+                Context::Nested => {
+                    if let Err(e) = crate::selector::parse_relative_selector_list(&prelude) {
+                        self.errors.extend(e);
+                    }
+                }
                 Context::Opaque => {}
             }
         }
