@@ -24,8 +24,12 @@
 //!   another simple selector (`[x]p`), anything but a pseudo-class or
 //!   pseudo-element after a pseudo-element (`p::before.x`), a pseudo-element
 //!   before the last compound (`p::before span`), an `An+B` that does not
-//!   parse (`:nth-child(foo)`), an empty `:not()` or `:has()`. Browsers drop
-//!   such a rule just the same; epubcheck accepts it.
+//!   parse (`:nth-child(foo)`), an empty `:has()`. Browsers drop such a
+//!   rule just the same; epubcheck accepts it.
+//!
+//! The line follows what epubcheck 5.4.0 does, measured shape by shape, so
+//! one case sits where the definitions alone would not put it: an empty
+//! `:not()` is an `InvalidSelector`, because epubcheck reports it.
 //!
 //! When one selector has both, the token error is the one reported.
 //!
@@ -878,6 +882,12 @@ fn pseudo_class_function<'a>(
     Ok(if inner > MAX_SELECTOR_DEPTH {
         other()
     } else if is("not") {
+        // An empty `:not()` is a token error, not a structure one: epubcheck
+        // 5.4.0 reports it, where it passes an empty `:has()` (measured by
+        // epubveri, 2026-10-18).
+        if is_blank(args) {
+            return Err(bad(span));
+        }
         PseudoClass::Not(argument_list(args, false, span, inner, structure)?)
     } else if is("is") {
         let (selectors, dropped) = forgiving_list(args, inner);
@@ -1598,6 +1608,8 @@ mod tests {
             ("p:not(> a)", T),
             ("a:has(. x)", T),
             ("li:nth-child(2n of . a)", T),
+            ("p:not()", T),
+            ("p:not( )", T),
             // An id has to be an identifier.
             ("#1a", S),
             // Order inside a compound, and the pseudo-element's place.
@@ -1606,7 +1618,6 @@ mod tests {
             ("p::before.x", S),
             ("p::before span", S),
             // Arguments that are all valid pieces, wrongly put together.
-            ("p:not()", S),
             ("p:not(#1a)", S),
             ("a:has()", S),
             ("li:nth-child(foo)", S),
@@ -1633,9 +1644,10 @@ mod tests {
         assert_eq!(syntax_errors(css)[0].span.slice(css), ".");
     }
 
-    /// The fourteen probe shapes epubveri measured against epubcheck 5.4.0
+    /// The probe shapes epubveri measured against epubcheck 5.4.0
     /// (2026-10-18). The structure kind is exactly the set epubcheck
-    /// accepts; the token kind, the set it reports, or 0.12 missed.
+    /// accepts; the token kind, the set it reports. One exception: epubcheck
+    /// reports an empty `:is()`, which takes a forgiving list and is valid.
     #[test]
     fn epubveri_probe_shapes() {
         use SyntaxErrorKind::{InvalidSelector as T, InvalidSelectorStructure as S};
@@ -1654,6 +1666,16 @@ mod tests {
             (":nth-child(foo) { color: red }", vec![S]),
             (":has(. a) { color: red }", vec![T]),
             (":nth-child(2n+) { color: red }", vec![S]),
+            // The nine it added for the gate on d993de1.
+            (":not() { color: red }", vec![T]),
+            (":has() { color: red }", vec![S]),
+            (":nth-child(2n of) { color: red }", vec![S]),
+            (":nth-of-type(1.5) { color: red }", vec![S]),
+            (":not(#1a) { color: red }", vec![S]),
+            ("#1a, . b { color: red }", vec![S, T]),
+            ("#1a . b { color: red }", vec![T]),
+            (":is() { color: red }", vec![]),
+            (":nth-child(2n of p) { color: red }", vec![]),
         ] {
             assert_eq!(kinds(css), want, "{css}");
         }

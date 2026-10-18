@@ -229,7 +229,7 @@ pub enum SyntaxErrorKind {
     InvalidSelector,
     /// A style rule whose prelude is made of valid selector pieces put
     /// together in a way Selectors does not allow: `#1a`, `[x]p`,
-    /// `p::before.x`, `p::before span`, `:nth-child(foo)`, an empty `:not()`.
+    /// `p::before.x`, `p::before span`, `:nth-child(foo)`, an empty `:has()`.
     /// Browsers drop the rule as they do for
     /// [`InvalidSelector`](Self::InvalidSelector); epubcheck accepts it, which
     /// is why it has a kind of its own. The span is the misplaced piece, or the

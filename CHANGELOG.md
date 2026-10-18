@@ -24,15 +24,16 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   not, are still accepted with their arguments unread.
 - **Newly reported as `InvalidSelector`**, a token with no place in any
   selector that 0.12 let through: a second flag after an attribute value
-  (`[a=x i s]`), and a stray token inside `:not()`, `:has()` or
-  `:nth-child(… of …)` (`:not(. a)`). epubcheck reports these too.
+  (`[a=x i s]`), a stray token inside `:not()`, `:has()` or
+  `:nth-child(… of …)` (`:not(. a)`), and an empty `:not()`. epubcheck
+  reports these too.
 - **New `SyntaxErrorKind::InvalidSelectorStructure`** for valid selector
   pieces put together in a way Selectors does not allow: an id that is not
   an identifier (`#1a`), a type or universal selector after another simple
   selector (`[x]p`; `&div` stays valid), anything but a pseudo-class or
   pseudo-element after a pseudo-element (`p::before.x`), a pseudo-element
   before the last compound (`p::before span`), an `An+B` that does not
-  parse (`:nth-child(foo)`), an empty `:not()` or `:has()`, at any depth.
+  parse (`:nth-child(foo)`), an empty `:has()`, at any depth.
   Browsers drop such a rule; epubcheck 5.4.0 accepts it, so a caller can map
   it apart. A selector with both kinds reports the `InvalidSelector`, so the
   cap of one error per comma-separated selector stays. Breaking for an
