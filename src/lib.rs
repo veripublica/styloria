@@ -9,6 +9,7 @@
 
 mod descriptors;
 mod known_properties;
+pub mod matching;
 pub mod parser;
 pub mod selector;
 pub mod serialize;
@@ -17,6 +18,7 @@ pub mod token;
 pub mod tokenizer;
 pub mod validate;
 
+pub use matching::{Element, HTML_NAMESPACE, Match, Namespaces};
 pub use parser::{
     AtRule, Block, BlockItem, BlockKind, ComponentValue, Declaration, MAX_NESTING_DEPTH,
     QualifiedRule, Rule, SimpleBlock, Stylesheet, SyntaxError, SyntaxErrorKind,

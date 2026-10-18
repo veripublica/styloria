@@ -41,6 +41,16 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 - **`MAX_SELECTOR_DEPTH`** (32): selector arguments deeper than this come
   back as `PseudoClass::Other`, unread, so that `:is(:is(…))` at the
   parser's nesting limit cannot overflow the stack.
+- **Selector matching** (`matching` module). The caller describes its tree
+  through the `Element` trait — parent, previous and next sibling element,
+  whether it has children, local name, namespace URI, attributes, and
+  whether the document is HTML (names compare case-insensitively) or XML
+  (they do not). `SelectorList::matches` and `ComplexSelector::matches`
+  answer `Match::Yes`, `No` or `Unknown`; Unknown stands for what a static
+  tree cannot settle (`:hover`, `:has()`, pseudo-elements, `&`, a relative
+  selector's leading combinator, a dropped `:is()` argument) and propagates
+  as three-valued logic. `Namespaces` carries the `@namespace` prefixes;
+  an undeclared prefix matches nothing, as in a browser.
 
 ## [0.12.0] - 2026-10-02
 
