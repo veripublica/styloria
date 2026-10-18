@@ -22,13 +22,22 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   `:is()` and `:where()` are forgiving, as the spec says: a bad argument is
   dropped, not reported. Other pseudo-classes and pseudo-elements, known or
   not, are still accepted with their arguments unread.
-- **Newly reported**, each a shape no version of Selectors allows: an id
-  that is not an identifier (`#1a`), a type or universal selector after
-  another simple selector (`[x]p`; `&div` stays valid), anything but a
-  pseudo-class or pseudo-element after a pseudo-element (`p::before.x`), a
-  pseudo-element before the last compound (`p::before span`), and more than
-  one flag after an attribute value (`[a=x i s]`). No stylesheet on the
-  878-sheet shelf changed.
+- **Newly reported as `InvalidSelector`**, a token with no place in any
+  selector that 0.12 let through: a second flag after an attribute value
+  (`[a=x i s]`), and a stray token inside `:not()`, `:has()` or
+  `:nth-child(… of …)` (`:not(. a)`). epubcheck reports these too.
+- **New `SyntaxErrorKind::InvalidSelectorStructure`** for valid selector
+  pieces put together in a way Selectors does not allow: an id that is not
+  an identifier (`#1a`), a type or universal selector after another simple
+  selector (`[x]p`; `&div` stays valid), anything but a pseudo-class or
+  pseudo-element after a pseudo-element (`p::before.x`), a pseudo-element
+  before the last compound (`p::before span`), an `An+B` that does not
+  parse (`:nth-child(foo)`), an empty `:not()` or `:has()`, at any depth.
+  Browsers drop such a rule; epubcheck 5.4.0 accepts it, so a caller can map
+  it apart. A selector with both kinds reports the `InvalidSelector`, so the
+  cap of one error per comma-separated selector stays. Breaking for an
+  exhaustive `match` on `SyntaxErrorKind`. No stylesheet on the 878-sheet
+  shelf changed.
 
 ### Added
 
@@ -47,9 +56,11 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   whether the document is HTML (names compare case-insensitively) or XML
   (they do not). `SelectorList::matches` and `ComplexSelector::matches`
   answer `Match::Yes`, `No` or `Unknown`; Unknown stands for what a static
-  tree cannot settle (`:hover`, `:has()`, pseudo-elements, `&`, a relative
+  tree cannot settle (`:hover`, `:has()`, `&`, a relative
   selector's leading combinator, a dropped `:is()` argument) and propagates
-  as three-valued logic. `Namespaces` carries the `@namespace` prefixes;
+  as three-valued logic. The answer is about the element itself: a
+  selector ending in a pseudo-element (`img::before`) answers No, since it
+  styles a generated box, not the element. `Namespaces` carries the `@namespace` prefixes;
   an undeclared prefix matches nothing, as in a browser.
 - **Structured at-rule preludes** (`at_rule` module): `parse_namespace_rule`,
   `parse_import_rule` (url, `layer`/`layer(name)`, `supports(…)`, media

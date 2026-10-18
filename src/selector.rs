@@ -11,9 +11,23 @@
 //! [`SelectorList`] → [`ComplexSelector`] (compounds joined by combinators) →
 //! [`CompoundSelector`] → [`SimpleSelector`]. Every node carries its span. A
 //! prelude that cannot be a selector list comes back as the
-//! [`SyntaxError`]s saying where, which is what the parser reports as
-//! [`SyntaxErrorKind::InvalidSelector`]. [`Specificity`] is computed from the
-//! tree.
+//! [`SyntaxError`]s saying where. [`Specificity`] is computed from the tree.
+//!
+//! **Two kinds of error**, because tools that check CSS draw the line there:
+//!
+//! - [`SyntaxErrorKind::InvalidSelector`]: a token that has no place at that
+//!   point in any selector — a stray `.`, a combinator with nothing on one
+//!   side, an attribute selector with a missing value or a second flag.
+//! - [`SyntaxErrorKind::InvalidSelectorStructure`]: every token is a valid
+//!   selector piece, but they are put together in a way Selectors does not
+//!   allow — an id that is not an identifier (`#1a`), a type selector after
+//!   another simple selector (`[x]p`), anything but a pseudo-class or
+//!   pseudo-element after a pseudo-element (`p::before.x`), a pseudo-element
+//!   before the last compound (`p::before span`), an `An+B` that does not
+//!   parse (`:nth-child(foo)`), an empty `:not()` or `:has()`. Browsers drop
+//!   such a rule just the same; epubcheck accepts it.
+//!
+//! When one selector has both, the token error is the one reported.
 //!
 //! The reading is *syntactic*. It does not care whether `dvi` is a real
 //! element name, or whether `[hrefff]` is a real attribute.
@@ -376,7 +390,7 @@ impl SimpleSelector<'_> {
 pub fn parse_selector_list<'a>(
     prelude: &[Spanned<ComponentValue<'a>>],
 ) -> Result<SelectorList<'a>, Vec<SyntaxError>> {
-    into_result(list(prelude, false, 0))
+    into_result(list(prelude, false, 0, false))
 }
 
 /// [`parse_selector_list`] for a **relative** selector list (Selectors Level
@@ -386,7 +400,7 @@ pub fn parse_selector_list<'a>(
 pub fn parse_relative_selector_list<'a>(
     prelude: &[Spanned<ComponentValue<'a>>],
 ) -> Result<SelectorList<'a>, Vec<SyntaxError>> {
-    into_result(list(prelude, true, 0))
+    into_result(list(prelude, true, 0, false))
 }
 
 fn into_result<'a>(
@@ -415,12 +429,13 @@ fn into_result<'a>(
 /// nothing, so it is invisible without a check like that.
 ///
 /// The prelude is read as a relative list, which accepts every style rule's
-/// prelude wherever it sits. Selectors that fail to parse are skipped; the
-/// names in the others still come back.
+/// prelude wherever it sits. A selector with a structure error still
+/// names what it names; one with a token error is skipped. The names in the
+/// others come back either way.
 pub fn type_selector_names<'a>(
     prelude: &[Spanned<ComponentValue<'a>>],
 ) -> Vec<Spanned<Cow<'a, str>>> {
-    list(prelude, true, 0)
+    list(prelude, true, 0, true)
         .0
         .selectors
         .into_iter()
@@ -433,20 +448,31 @@ pub fn type_selector_names<'a>(
         .collect()
 }
 
-/// The selectors that parsed, and the errors for those that did not.
+/// The selectors that parsed, and the errors for those that did not. With
+/// `keep_flawed`, a selector with only a structure error is kept as well as
+/// reported.
 fn list<'a>(
     values: &Values<'a>,
     relative: bool,
     depth: usize,
+    keep_flawed: bool,
 ) -> (SelectorList<'a>, Vec<SyntaxError>) {
     let mut selectors = Vec::new();
     let mut errors = Vec::new();
-    split_on_commas(values, &mut errors, |part, errors| {
-        match complex(part, relative, depth) {
-            Ok(c) => selectors.push(c),
+    split_on_commas(
+        values,
+        &mut errors,
+        |part, errors| match complex_with_structure(part, relative, depth) {
+            Ok((c, None)) => selectors.push(c),
+            Ok((c, Some(span))) => {
+                errors.push(structure_error(span));
+                if keep_flawed {
+                    selectors.push(c);
+                }
+            }
             Err(e) => errors.push(e),
-        }
-    });
+        },
+    );
     (SelectorList { selectors }, errors)
 }
 
@@ -468,21 +494,33 @@ fn forgiving_list<'a>(values: &Values<'a>, depth: usize) -> (SelectorList<'a>, u
     (SelectorList { selectors }, dropped)
 }
 
-/// A non-forgiving list inside a pseudo-class's parentheses: `Err` with the
-/// earliest error, which then stands for the whole outer selector. An empty
-/// list is an error at the function itself.
+/// A non-forgiving list inside a pseudo-class's parentheses. A token error
+/// inside is `Err`, and stands for the whole outer selector. A structure
+/// error inside, or an empty list, goes into `structure` for the outer
+/// selector, whose reading carries on so that a token error later in it
+/// still wins.
 fn argument_list<'a>(
     values: &Values<'a>,
     relative: bool,
     function: Span,
     depth: usize,
+    structure: &mut Option<Span>,
 ) -> Result<SelectorList<'a>, SyntaxError> {
-    let (list, errors) = list(values, relative, depth);
-    if let Some(first) = errors.into_iter().min_by_key(|e| e.span.start) {
-        return Err(first);
+    let (list, errors) = list(values, relative, depth, false);
+    let earliest = |kind| {
+        errors
+            .iter()
+            .filter(|e| e.kind == kind)
+            .min_by_key(|e| e.span.start)
+            .copied()
+    };
+    if let Some(e) = earliest(SyntaxErrorKind::InvalidSelector) {
+        return Err(e);
     }
-    if list.selectors.is_empty() {
-        return Err(bad(function));
+    if let Some(e) = earliest(SyntaxErrorKind::InvalidSelectorStructure) {
+        note(structure, e.span);
+    } else if list.selectors.is_empty() {
+        note(structure, function);
     }
     Ok(list)
 }
@@ -535,6 +573,21 @@ fn complex<'a>(
     relative: bool,
     depth: usize,
 ) -> Result<Spanned<ComplexSelector<'a>>, SyntaxError> {
+    match complex_with_structure(part, relative, depth)? {
+        (c, None) => Ok(c),
+        (_, Some(span)) => Err(structure_error(span)),
+    }
+}
+
+/// [`complex`], with a structure error handed back beside the selector
+/// rather than instead of it. A token error is still `Err`, and wins.
+fn complex_with_structure<'a>(
+    part: &Values<'a>,
+    relative: bool,
+    depth: usize,
+) -> Result<(Spanned<ComplexSelector<'a>>, Option<Span>), SyntaxError> {
+    // The first structure error, if any; reading goes on past it.
+    let mut structure = None;
     let mut i = skip_ws(part, 0);
     let first = part[i].span;
     let mut leading = None;
@@ -569,7 +622,7 @@ fn complex<'a>(
             combinators.push(Combinator::Descendant);
         }
         pending = None;
-        let (c, n) = compound(part, i, depth)?;
+        let (c, n) = compound(part, i, depth, &mut structure)?;
         compounds.push(c);
         i += n;
     }
@@ -584,16 +637,19 @@ fn complex<'a>(
             .flat_map(|c| &c.node.simples)
             .find(|s| matches!(s.node, SimpleSelector::PseudoElement(_)))
     {
-        return Err(bad(pe.span));
+        note(&mut structure, pe.span);
     }
     let last = compounds.last().map_or(first, |c| c.span);
-    Ok(Spanned::new(
-        ComplexSelector {
-            leading,
-            compounds,
-            combinators,
-        },
-        first.to(last),
+    Ok((
+        Spanned::new(
+            ComplexSelector {
+                leading,
+                compounds,
+                combinators,
+            },
+            first.to(last),
+        ),
+        structure,
     ))
 }
 
@@ -604,6 +660,7 @@ fn compound<'a>(
     part: &Values<'a>,
     start: usize,
     depth: usize,
+    structure: &mut Option<Span>,
 ) -> Result<(Spanned<CompoundSelector<'a>>, usize), SyntaxError> {
     let mut simples: Vec<Spanned<SimpleSelector<'a>>> = Vec::new();
     let mut after_pseudo_element = false;
@@ -612,7 +669,7 @@ fn compound<'a>(
         if is_whitespace(&cv.node) || combinator(&cv.node).is_some() {
             break;
         }
-        let (s, n) = simple(part, i, depth)?;
+        let (s, n) = simple(part, i, depth, structure)?;
         let in_order = match &s.node {
             // Type and universal come first; CSS Nesting lets `&` go before.
             SimpleSelector::Type(_) | SimpleSelector::Universal(_) => simples
@@ -626,7 +683,7 @@ fn compound<'a>(
             _ => !after_pseudo_element,
         };
         if !in_order {
-            return Err(bad(s.span));
+            note(structure, s.span);
         }
         simples.push(s);
         i += n;
@@ -640,6 +697,7 @@ fn simple<'a>(
     part: &Values<'a>,
     i: usize,
     depth: usize,
+    structure: &mut Option<Span>,
 ) -> Result<(Spanned<SimpleSelector<'a>>, usize), SyntaxError> {
     let cv = &part[i];
     let one = |s| Ok((Spanned::new(s, cv.span), 1));
@@ -667,7 +725,10 @@ fn simple<'a>(
         // `|E`, `|*`.
         ComponentValue::Token(Token::Delim('|')) => namespaced(part, i, i, Namespace::NoNamespace),
         // `#id`: the hash has to be a valid identifier, so `#1a` is not one.
-        ComponentValue::Token(Token::Hash { value, is_id: true }) => {
+        ComponentValue::Token(Token::Hash { value, is_id }) => {
+            if !is_id {
+                note(structure, cv.span);
+            }
             one(SimpleSelector::Id(value.clone()))
         }
         // `.class`: the name must follow immediately.
@@ -687,7 +748,7 @@ fn simple<'a>(
         ComponentValue::Block(b) if b.kind == BlockKind::Square => one(SimpleSelector::Attribute(
             Box::new(attribute(&b.values, cv.span)?),
         )),
-        ComponentValue::Token(Token::Colon) => pseudo(part, i, depth),
+        ComponentValue::Token(Token::Colon) => pseudo(part, i, depth, structure),
         // Anything else — a number, a string, a `( … )` — cannot start a
         // simple selector.
         _ => Err(bad(cv.span)),
@@ -724,6 +785,7 @@ fn pseudo<'a>(
     part: &Values<'a>,
     i: usize,
     depth: usize,
+    structure: &mut Option<Span>,
 ) -> Result<(Spanned<SimpleSelector<'a>>, usize), SyntaxError> {
     let colon = part[i].span;
     let double = matches!(
@@ -748,9 +810,9 @@ fn pseudo<'a>(
             })
         }
         (ComponentValue::Token(Token::Ident(name)), false) => pseudo_class_ident(name),
-        (ComponentValue::Function { name, args }, false) => {
-            SimpleSelector::PseudoClass(pseudo_class_function(name, args, target.span, depth)?)
-        }
+        (ComponentValue::Function { name, args }, false) => SimpleSelector::PseudoClass(
+            pseudo_class_function(name, args, target.span, depth, structure)?,
+        ),
         _ => return Err(bad(colon)),
     };
     Ok((Spanned::new(s, colon.to(target.span)), n + 1))
@@ -796,16 +858,27 @@ fn pseudo_class_function<'a>(
     args: &Values<'a>,
     span: Span,
     depth: usize,
+    structure: &mut Option<Span>,
 ) -> Result<PseudoClass<'a>, SyntaxError> {
     let is = |s: &str| name.eq_ignore_ascii_case(s);
     let inner = depth + 1;
-    Ok(if inner > MAX_SELECTOR_DEPTH {
-        PseudoClass::Other {
-            name: name.clone(),
-            args: Some(args.to_vec()),
+    let other = || PseudoClass::Other {
+        name: name.clone(),
+        args: Some(args.to_vec()),
+    };
+    // An `An+B` that does not parse is a structure error; the pseudo-class
+    // is kept unread.
+    let nth = |values: &Values<'a>, structure: &mut Option<Span>| {
+        let n = an_plus_b(values);
+        if n.is_none() {
+            note(structure, span);
         }
+        n
+    };
+    Ok(if inner > MAX_SELECTOR_DEPTH {
+        other()
     } else if is("not") {
-        PseudoClass::Not(argument_list(args, false, span, inner)?)
+        PseudoClass::Not(argument_list(args, false, span, inner, structure)?)
     } else if is("is") {
         let (selectors, dropped) = forgiving_list(args, inner);
         PseudoClass::Is { selectors, dropped }
@@ -813,35 +886,37 @@ fn pseudo_class_function<'a>(
         let (selectors, dropped) = forgiving_list(args, inner);
         PseudoClass::Where { selectors, dropped }
     } else if is("has") {
-        PseudoClass::Has(argument_list(args, true, span, inner)?)
+        PseudoClass::Has(argument_list(args, true, span, inner, structure)?)
     } else if is("nth-child") || is("nth-last-child") {
         // `An+B of S`: An+B never contains the ident `of`, so the first one
         // is the separator.
         let of = args.iter().position(
             |cv| matches!(&cv.node, ComponentValue::Token(Token::Ident(w)) if w.eq_ignore_ascii_case("of")),
         );
-        let (nth, of) = match of {
+        let (anb, of) = match of {
             Some(k) => (
                 &args[..k],
-                Some(argument_list(&args[k + 1..], false, span, inner)?),
+                Some(argument_list(
+                    &args[k + 1..],
+                    false,
+                    span,
+                    inner,
+                    structure,
+                )?),
             ),
             None => (args, None),
         };
-        let nth = an_plus_b(nth).ok_or_else(|| bad(span))?;
-        if is("nth-child") {
-            PseudoClass::NthChild { nth, of }
-        } else {
-            PseudoClass::NthLastChild { nth, of }
+        match nth(anb, structure) {
+            None => other(),
+            Some(nth) if is("nth-child") => PseudoClass::NthChild { nth, of },
+            Some(nth) => PseudoClass::NthLastChild { nth, of },
         }
     } else if is("nth-of-type") {
-        PseudoClass::NthOfType(an_plus_b(args).ok_or_else(|| bad(span))?)
+        nth(args, structure).map_or_else(other, PseudoClass::NthOfType)
     } else if is("nth-last-of-type") {
-        PseudoClass::NthLastOfType(an_plus_b(args).ok_or_else(|| bad(span))?)
+        nth(args, structure).map_or_else(other, PseudoClass::NthLastOfType)
     } else {
-        PseudoClass::Other {
-            name: name.clone(),
-            args: Some(args.to_vec()),
-        }
+        other()
     })
 }
 
@@ -1077,6 +1152,18 @@ fn bad(span: Span) -> SyntaxError {
     }
 }
 
+fn structure_error(span: Span) -> SyntaxError {
+    SyntaxError {
+        span,
+        kind: SyntaxErrorKind::InvalidSelectorStructure,
+    }
+}
+
+/// Keep the first structure error a selector has.
+fn note(structure: &mut Option<Span>, span: Span) {
+    structure.get_or_insert(span);
+}
+
 fn is_delim(cv: Option<&Spanned<ComponentValue<'_>>>, c: char) -> bool {
     matches!(cv.map(|v| &v.node), Some(ComponentValue::Token(Token::Delim(d))) if *d == c)
 }
@@ -1114,10 +1201,21 @@ mod tests {
 
     /// Every selector error the module reports, for one stylesheet.
     fn sel_errors(css: &str) -> usize {
+        kinds(css).len()
+    }
+
+    /// The kinds of the selector errors reported for one stylesheet.
+    fn kinds(css: &str) -> Vec<SyntaxErrorKind> {
         syntax_errors(css)
             .into_iter()
-            .filter(|e| e.kind == SyntaxErrorKind::InvalidSelector)
-            .count()
+            .map(|e| e.kind)
+            .filter(|k| {
+                matches!(
+                    k,
+                    SyntaxErrorKind::InvalidSelector | SyntaxErrorKind::InvalidSelectorStructure
+                )
+            })
+            .collect()
     }
 
     /// The first rule's prelude, parsed as a selector list.
@@ -1168,8 +1266,10 @@ mod tests {
         assert_eq!(type_names(":root{color:red}"), Vec::<String>::new());
         // The head only: `p.a.b` names `p` once, not its classes.
         assert_eq!(type_names("p.a.b{color:red}"), ["p"]);
-        // A broken selector is skipped; its neighbour still counts.
+        // A selector with a token error is skipped; its neighbour still
+        // counts. One with only a structure error still names what it names.
         assert_eq!(type_names("h4a, . x{color:red}"), ["h4a"]);
+        assert_eq!(type_names("#1a h4a{color:red}"), ["h4a"]);
     }
 
     /// The tree for one everyday selector, node by node.
@@ -1462,53 +1562,100 @@ mod tests {
     }
 
     /// Shapes no version of Selectors can produce.
+    /// Shapes no version of Selectors can produce, each with the kind it is
+    /// reported as.
     #[test]
     fn malformed_selectors_are_reported() {
-        for css in [
+        use SyntaxErrorKind::{InvalidSelector as T, InvalidSelectorStructure as S};
+        for (css, kind) in [
             // Combinator with nothing on one side.
-            "> p { color: red }",
-            "div > { color: red }",
-            "div > > p { color: red }",
+            ("> p", T),
+            ("div >", T),
+            ("div > > p", T),
             // Empty side of a comma.
-            ", p { color: red }",
-            "h1, { color: red }",
-            "h1,, h2 { color: red }",
+            (", p", T),
+            ("h1,", T),
+            ("h1,, h2", T),
             // A class or namespace separator with no name after it.
-            ". { color: red }",
-            "ns| { color: red }",
-            "| { color: red }",
+            (".", T),
+            ("ns|", T),
+            ("|", T),
             // A colon with no pseudo name.
-            "a: { color: red }",
+            ("a:", T),
             // Attribute selectors.
-            "[] { color: red }",
-            "[=x] { color: red }",
-            "[href=] { color: red }",
-            "[href~] { color: red }",
-            "[*|] { color: red }",
-            "[href=x i s] { color: red }",
-            "[href=x 1] { color: red }",
+            ("[]", T),
+            ("[=x]", T),
+            ("[href=]", T),
+            ("[href~]", T),
+            ("[*|]", T),
+            ("[href=x i s]", T),
+            ("[href=x 1]", T),
             // A token that cannot start a simple selector.
-            "\"str\" { color: red }",
-            "42 { color: red }",
+            ("\"str\"", T),
+            ("42", T),
+            // Arguments with a selector grammar: a token error inside is one.
+            ("p:not(. a)", T),
+            ("p:not(> a)", T),
+            ("a:has(. x)", T),
+            ("li:nth-child(2n of . a)", T),
             // An id has to be an identifier.
-            "#1a { color: red }",
-            // Order inside a compound.
-            ".adiv* { color: red }",
-            "[x]p { color: red }",
-            "p::before.x { color: red }",
-            "p::before span { color: red }",
-            // Arguments with a fixed grammar are read.
-            "p:not() { color: red }",
-            "p:not(. a) { color: red }",
-            "p:not(> a) { color: red }",
-            "a:has() { color: red }",
-            "a:has(. x) { color: red }",
-            "li:nth-child(foo) { color: red }",
-            "li:nth-child() { color: red }",
-            "li:nth-child(2n of) { color: red }",
-            "li:nth-of-type(1.5) { color: red }",
+            ("#1a", S),
+            // Order inside a compound, and the pseudo-element's place.
+            (".adiv*", S),
+            ("[x]p", S),
+            ("p::before.x", S),
+            ("p::before span", S),
+            // Arguments that are all valid pieces, wrongly put together.
+            ("p:not()", S),
+            ("p:not(#1a)", S),
+            ("a:has()", S),
+            ("li:nth-child(foo)", S),
+            ("li:nth-child()", S),
+            ("li:nth-child(2n of)", S),
+            ("li:nth-of-type(1.5)", S),
         ] {
-            assert!(sel_errors(css) > 0, "must be reported: {css}");
+            assert_eq!(kinds(&format!("{css} {{ color: red }}")), [kind], "{css}");
+        }
+    }
+
+    /// A selector with both kinds of error reports the token one: that is the
+    /// one epubcheck reports too, and the per-selector cap stays one.
+    #[test]
+    fn a_token_error_wins_over_a_structure_error() {
+        use SyntaxErrorKind::{InvalidSelector as T, InvalidSelectorStructure as S};
+        assert_eq!(kinds("#1a . b { color: red }"), [T]);
+        assert_eq!(kinds("[x]p:not(. b) { color: red }"), [T]);
+        assert_eq!(kinds(":nth-child(foo) > > a { color: red }"), [T]);
+        // In separate selectors, each reports its own.
+        assert_eq!(kinds("#1a, . b { color: red }"), [S, T]);
+        // The token error's span, not the structure error's.
+        let css = "#1a . b { color: red }";
+        assert_eq!(syntax_errors(css)[0].span.slice(css), ".");
+    }
+
+    /// The fourteen probe shapes epubveri measured against epubcheck 5.4.0
+    /// (2026-10-18). The structure kind is exactly the set epubcheck
+    /// accepts; the token kind, the set it reports, or 0.12 missed.
+    #[test]
+    fn epubveri_probe_shapes() {
+        use SyntaxErrorKind::{InvalidSelector as T, InvalidSelectorStructure as S};
+        for (css, want) in [
+            ("p.x { color: red }", vec![]),
+            (". a { color: red }", vec![T]),
+            ("[a=x i] { color: red }", vec![]),
+            ("p { & div { color: red } }", vec![]),
+            ("#1a { color: red }", vec![S]),
+            ("[x]p { color: red }", vec![S]),
+            (".a* { color: red }", vec![S]),
+            ("p::before.x { color: red }", vec![S]),
+            ("p::before span { color: red }", vec![S]),
+            ("[a=x i s] { color: red }", vec![T]),
+            (":not(. a) { color: red }", vec![T]),
+            (":nth-child(foo) { color: red }", vec![S]),
+            (":has(. a) { color: red }", vec![T]),
+            (":nth-child(2n+) { color: red }", vec![S]),
+        ] {
+            assert_eq!(kinds(css), want, "{css}");
         }
     }
 

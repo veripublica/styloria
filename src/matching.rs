@@ -6,14 +6,20 @@
 //! matches an element.
 //!
 //! The answer is three-valued, [`Match`]: `Yes`, `No`, or `Unknown` when the
-//! selector depends on something a static tree does not say. A caller that
+//! selector depends on something a static tree does not say.
+//!
+//! **The answer is about the element itself**, not its pseudo-elements. A
+//! selector ending in a pseudo-element (`img::before`) styles a box the
+//! element generates, never the element's own properties, so it answers No.
+//! A caller asking "does anything style this element or the boxes it
+//! generates" has to look at those selectors separately. A caller that
 //! acts only on a certain "no" (a converter deciding whether CSS could
 //! override an attribute, say) treats `Unknown` as `Yes`; one that reports
 //! can say which it was. Unknown covers:
 //!
 //! - state and other pseudo-classes this code does not answer (`:hover`,
 //!   `:visited`, `:lang()`, `:has()`, vendor and future names);
-//! - pseudo-elements, and `&` (whose meaning is the parent rule's selector);
+//! - `&`, whose meaning is the parent rule's selector;
 //! - a relative selector's leading combinator (`> a` in a nested rule);
 //! - `:is()`/`:where()` arguments the forgiving parse dropped;
 //! - `[*|attr]`, which would need every namespace's attribute of that name;
@@ -41,8 +47,8 @@ pub const HTML_NAMESPACE: &str = "http://www.w3.org/1999/xhtml";
 pub enum Match {
     No,
     Yes,
-    /// It depends on something the tree does not say: a state, a
-    /// pseudo-element, a construct this code does not evaluate.
+    /// It depends on something the tree does not say: a state, the parent
+    /// rule behind `&`, a construct this code does not evaluate.
     Unknown,
 }
 
@@ -227,7 +233,10 @@ impl Matcher<'_, '_> {
             SimpleSelector::Class(class) => Match::from_bool(element.has_class(class)),
             SimpleSelector::Attribute(attr) => self.attribute(attr, element),
             SimpleSelector::PseudoClass(p) => self.pseudo_class(p, element),
-            SimpleSelector::PseudoElement(_) | SimpleSelector::Nesting => Match::Unknown,
+            // The selector is about a box the element generates, not the
+            // element.
+            SimpleSelector::PseudoElement(_) => Match::No,
+            SimpleSelector::Nesting => Match::Unknown,
         }
     }
 
@@ -759,7 +768,9 @@ mod tests {
             (3, "p:hover", Unknown),
             (3, "div:hover", No), // No wins over Unknown in a compound
             (3, "p:not(:hover)", Unknown),
-            (3, "p::before", Unknown),
+            (3, "p::before", No),
+            (3, "p:hover::before", No),
+            (3, "p::part(x)", No),
             (3, "p:has(img)", Unknown),
             (3, "p:lang(en)", Unknown),
             (3, ":is(p, > x)", Yes),

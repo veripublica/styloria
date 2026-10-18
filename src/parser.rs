@@ -185,7 +185,7 @@ pub struct SyntaxError {
 /// | kind | top level | inside a block |
 /// |---|---|---|
 /// | [`BadString`](Self::BadString), [`BadUrl`](Self::BadUrl), [`InvalidUnicodeRange`](Self::InvalidUnicodeRange), [`UnterminatedBlock`](Self::UnterminatedBlock), [`NestingTooDeep`](Self::NestingTooDeep) | yes | yes |
-/// | [`InvalidSelector`](Self::InvalidSelector) | yes | yes |
+/// | [`InvalidSelector`](Self::InvalidSelector), [`InvalidSelectorStructure`](Self::InvalidSelectorStructure) | yes | yes |
 /// | [`UnterminatedRule`](Self::UnterminatedRule), [`DroppedCustomPropertyRule`](Self::DroppedCustomPropertyRule) | yes | never |
 /// | [`MalformedDeclaration`](Self::MalformedDeclaration), [`UnexpectedToken`](Self::UnexpectedToken) | never | yes |
 ///
@@ -223,7 +223,21 @@ pub enum SyntaxErrorKind {
     /// is read as a *relative* selector list, so `> a` is fine there and not
     /// at the top level. The rule itself is kept in the tree. See [`crate::selector`] for what is and isn't reported — the
     /// check is syntactic and deliberately permissive.
+    ///
+    /// This kind is for a token that has no place at that point in any
+    /// selector (`. a`, `a > > b`, `[href=]`); the span is that token.
     InvalidSelector,
+    /// A style rule whose prelude is made of valid selector pieces put
+    /// together in a way Selectors does not allow: `#1a`, `[x]p`,
+    /// `p::before.x`, `p::before span`, `:nth-child(foo)`, an empty `:not()`.
+    /// Browsers drop the rule as they do for
+    /// [`InvalidSelector`](Self::InvalidSelector); epubcheck accepts it, which
+    /// is why it has a kind of its own. The span is the misplaced piece, or the
+    /// `name(…)` of the pseudo-class whose argument is wrong.
+    ///
+    /// A selector with both kinds reports the `InvalidSelector`, so each
+    /// comma-separated selector still yields at most one error.
+    InvalidSelectorStructure,
     /// Block/function nesting past [`MAX_NESTING_DEPTH`]. The contents below
     /// that point are discarded rather than parsed, so this is reported
     /// once, at the outermost bracket that was refused.
