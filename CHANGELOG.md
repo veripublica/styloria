@@ -51,6 +51,16 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   selector's leading combinator, a dropped `:is()` argument) and propagates
   as three-valued logic. `Namespaces` carries the `@namespace` prefixes;
   an undeclared prefix matches nothing, as in a browser.
+- **Structured at-rule preludes** (`at_rule` module): `parse_namespace_rule`,
+  `parse_import_rule` (url, `layer`/`layer(name)`, `supports(…)`, media
+  queries), `parse_layer_rule` (statement, named block, anonymous block)
+  and `parse_media_query_list` (`[not|only]? type [and condition]?` or a
+  condition alone; a rejected query becomes `MediaQuery::Invalid`, which
+  never holds, and the rest of the list stands). Conditions are kept as
+  written, not evaluated. Each returns `None` for a prelude its grammar
+  rejects; none reports a `SyntaxError`. `Namespaces::from_stylesheet`
+  reads the `@namespace` rules in their proper place at the head of a
+  sheet and ignores later ones, as a browser does.
 
 ## [0.12.0] - 2026-10-02
 

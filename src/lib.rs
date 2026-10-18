@@ -7,6 +7,7 @@
 //! every node, and every [`SyntaxError`] it recovered from.
 //! [`parse_block_contents`] does the same for a `style="…"` attribute.
 
+pub mod at_rule;
 mod descriptors;
 mod known_properties;
 pub mod matching;
@@ -18,6 +19,11 @@ pub mod token;
 pub mod tokenizer;
 pub mod validate;
 
+pub use at_rule::{
+    ImportLayer, ImportRule, LayerName, LayerRule, MediaQualifier, MediaQuery, MediaQueryList,
+    NamespaceRule, parse_import_rule, parse_layer_rule, parse_media_query_list,
+    parse_namespace_rule,
+};
 pub use matching::{Element, HTML_NAMESPACE, Match, Namespaces};
 pub use parser::{
     AtRule, Block, BlockItem, BlockKind, ComponentValue, Declaration, MAX_NESTING_DEPTH,
