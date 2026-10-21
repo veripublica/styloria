@@ -310,6 +310,42 @@ pub fn parse_block_contents(css: &str) -> (Vec<BlockItem<'_>>, Vec<SyntaxError>)
     (items, p.finish())
 }
 
+/// The bytes to remove to delete a declaration from `source`: the
+/// declaration (its span), what stands between it and its `;` (whitespace,
+/// comments), the `;`, and the whitespace after, up to the next token or
+/// comment. Without a `;` (the last declaration of a block), the
+/// declaration's own span.
+///
+/// Deleting this span leaves the block as if the declaration had never
+/// been written, keeping the next declaration's indentation as the one
+/// before had it.
+pub fn declaration_removal_span(source: &str, declaration: Span) -> Span {
+    let bytes = source.as_bytes();
+    let is_ws = |b: u8| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b'\x0C');
+    let mut i = declaration.end.min(bytes.len());
+    loop {
+        while i < bytes.len() && is_ws(bytes[i]) {
+            i += 1;
+        }
+        if bytes[i..].starts_with(b"/*") {
+            match source[i + 2..].find("*/") {
+                Some(end) => i += 2 + end + 2,
+                None => return declaration,
+            }
+            continue;
+        }
+        break;
+    }
+    if bytes.get(i) != Some(&b';') {
+        return declaration;
+    }
+    i += 1;
+    while i < bytes.len() && is_ws(bytes[i]) {
+        i += 1;
+    }
+    Span::new(declaration.start, i)
+}
+
 /// How the preludes of qualified rules in a block are read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Context {
@@ -1696,5 +1732,31 @@ mod nesting_guard_tests {
                 "the rule after the refused one must still parse"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod removal_tests {
+    use super::*;
+
+    /// The block with declaration `n` removed.
+    fn remove(css: &str, n: usize) -> String {
+        let (items, _) = parse_block_contents(css);
+        let span = declaration_removal_span(css, items[n].span());
+        format!("{}{}", &css[..span.start], &css[span.end..])
+    }
+
+    #[test]
+    fn a_removed_declaration_takes_its_semicolon_and_spacing() {
+        assert_eq!(remove("a: 1; b: 2; c: 3", 0), "b: 2; c: 3");
+        assert_eq!(remove("a: 1; b: 2; c: 3", 1), "a: 1; c: 3");
+        assert_eq!(remove("a: 1;\n  b: 2;\n  c: 3", 1), "a: 1;\n  c: 3");
+        // Comments before the `;` go with it; one after it stays.
+        assert_eq!(remove("a: 1 /* x */ ; /* y */ b: 2", 0), "/* y */ b: 2");
+        // The last one has no `;` to take.
+        assert_eq!(remove("a: 1; b: 2 ", 1), "a: 1;  ");
+        assert_eq!(remove("a: 1 !important; b: 2", 0), "b: 2");
+        // An unclosed comment: only the declaration.
+        assert_eq!(remove("a: 1 /* x", 0), " /* x");
     }
 }

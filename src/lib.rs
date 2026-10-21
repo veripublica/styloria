@@ -44,7 +44,7 @@ pub use matching::{Element, HTML_NAMESPACE, MAX_MATCH_STEPS, Match, Namespaces};
 pub use parser::{
     AtRule, Block, BlockItem, BlockKind, ComponentValue, Declaration, MAX_NESTING_DEPTH,
     QualifiedRule, Rule, SimpleBlock, Stylesheet, SyntaxError, SyntaxErrorKind,
-    parse_block_contents, parse_stylesheet, syntax_errors,
+    declaration_removal_span, parse_block_contents, parse_stylesheet, syntax_errors,
 };
 pub use properties::longhands;
 pub use references::{

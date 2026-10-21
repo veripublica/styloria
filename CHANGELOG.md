@@ -80,6 +80,13 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   fit everything. Bounded by `MAX_VALUE_STEPS`. Shelf: 88,442 style-rule
   declarations in 0.42 s, 444 Invalid in 62 books; each of the 206
   distinct invalid values is rejected by Firefox 158's `CSS.supports` too.
+- **`DiagnosticKind::InvalidValue`**: `validate_*` reports a property
+  declaration whose value `check_declaration` finds certainly invalid, in
+  style rules (any depth) and `style` attributes, not in descriptors. The
+  span covers the value's bytes exactly, `name` is the property; one per
+  declaration. A new variant, so an exhaustive `match` must take it.
+- **`declaration_removal_span(source, span)`**: what to delete to remove a
+  declaration, its `;`, and the whitespace up to the next token.
 - **`MediaQueryList::always_holds`**: an empty list, `all` or `only all`.
   `@media all` and `@media {…}` are no longer conditions in the cascade.
 
@@ -90,6 +97,11 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   and attributes besides.
 
 ### Changed
+
+- **The cascade drops an invalid declaration**, as a browser does:
+  `width: banana` no longer sets `width`. An Unknown value still counts. On
+  epublift's 39 books no answer changes; building the shelf's 878 cascades
+  takes 0.40 s instead of 8 ms, the value checks.
 
 - **Matching has a step budget** (`MAX_MATCH_STEPS`, 4096 compounds tried
   per call, arguments included); past it the answer is `Unknown`. Nested

@@ -79,9 +79,13 @@
 //! ([`Cascade::with_imports`]): their rules take the `@import`'s place, in
 //! its layer, under its conditions.
 //!
-//! **Out of scope:** values are not checked, so `width: banana` counts as
-//! setting `width` although a browser drops it; user-agent and user styles,
-//! and inheritance, are not modelled.
+//! A declaration whose value is certainly invalid
+//! ([`check_declaration`](crate::check_declaration) says
+//! [`Invalid`](crate::ValueCheck::Invalid)) is dropped, as a browser drops
+//! it: `width: banana` sets nothing. One whose value is Unknown stays.
+//!
+//! **Out of scope:** user-agent and user styles, and inheritance, are not
+//! modelled.
 
 use crate::at_rule::{
     ImportLayer, ImportRule, LayerName, LayerRule, parse_import_rule, parse_layer_rule,
@@ -95,6 +99,7 @@ use crate::selector::{
 };
 use crate::span::Spanned;
 use crate::token::Token;
+use crate::values::{ValueCheck, check_declaration};
 
 /// One stylesheet given to the cascade.
 #[derive(Debug, Clone, Copy)]
@@ -352,7 +357,9 @@ impl<'s, 'a> Cascade<'s, 'a> {
             }
         }
         for (i, item) in inline.unwrap_or_default().iter().enumerate() {
-            if let BlockItem::Declaration(d) = item {
+            if let BlockItem::Declaration(d) = item
+                && check_declaration(&d.node) != ValueCheck::Invalid
+            {
                 let order = u32::try_from(i).unwrap_or(u32::MAX);
                 candidates.push(Candidate {
                     declaration: d,
@@ -700,6 +707,8 @@ impl<'s, 'a> Builder<'_, 's, 'a> {
         let mut current = None;
         for item in items {
             match item {
+                // A browser drops a declaration it cannot read.
+                BlockItem::Declaration(d) if check_declaration(&d.node) == ValueCheck::Invalid => {}
                 BlockItem::Declaration(d) => {
                     let index = *current.get_or_insert_with(|| {
                         self.rules.push(CascadeRule {
@@ -1282,5 +1291,20 @@ mod tests {
         assert!(!asked.contains(&"late.css".to_string()));
         // A sheet importing itself is followed once.
         assert_eq!(asked.iter().filter(|u| *u == "self.css").count(), 1);
+    }
+
+    #[test]
+    fn an_invalid_declaration_sets_nothing() {
+        let c = cascade(&["img { width: 1px } img { width: banana }"]);
+        assert_eq!(ask(&c, IMG, None, "width").1, "width: 1px");
+        let c = cascade(&["img { height: 102 }"]);
+        assert_eq!(ask(&c, IMG, None, "height").0, Match::No);
+        // Unknown is not invalid: it stays.
+        let c = cascade(&["img { width: 1px } img { width: var(--w) }"]);
+        let style = c.style_for(&IMG, None);
+        assert_eq!(style.property("width").setters.len(), 2);
+        // The `style` attribute too.
+        let c = cascade(&["img { width: 1px }"]);
+        assert_eq!(ask(&c, IMG, Some("width: banana"), "width").1, "width: 1px");
     }
 }

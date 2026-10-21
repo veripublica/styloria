@@ -27,6 +27,12 @@
 //! [`validate_declaration_list`], which checks against the property
 //! vocabulary.
 //!
+//! **Values.** A property declaration whose value cannot fit the property's
+//! grammar is an [`InvalidValue`](DiagnosticKind::InvalidValue), judged by
+//! [`check_declaration`](crate::check_declaration): only a certain
+//! [`Invalid`](crate::ValueCheck::Invalid), never an Unknown one. Descriptors
+//! have grammars of their own and are not value-checked.
+//!
 //! The guiding rule is asymmetric on purpose: **failing to flag an unknown
 //! name is safe; flagging a real one is not.** So every exemption below errs
 //! toward silence.
@@ -35,6 +41,7 @@ use crate::descriptors::descriptors_for;
 use crate::known_properties::is_known_property;
 use crate::parser::{self, BlockItem, Rule, Stylesheet};
 use crate::span::{Span, Spanned};
+use crate::values::{ValueCheck, check_declaration};
 
 /// One validation finding, located by the source [`Span`] it concerns.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +63,11 @@ pub enum DiagnosticKind {
     /// a descriptor. `at_rule` is the canonical at-rule name without the `@`
     /// (e.g. `"font-face"`).
     UnknownDescriptor { at_rule: &'static str },
+    /// A property declaration whose value cannot fit the property's grammar,
+    /// so a browser drops it. The span covers the value's bytes exactly
+    /// (without `!important`), so slicing the source with it gives the value
+    /// as written; `name` is the property.
+    InvalidValue,
 }
 
 /// The vocabulary a declaration's name is checked against — which set of
@@ -131,10 +143,30 @@ fn check_rule(rule: &Spanned<Rule<'_>>, out: &mut Vec<Diagnostic>) {
 fn check_items(items: &[BlockItem<'_>], vocab: &Vocab, out: &mut Vec<Diagnostic>) {
     for item in items {
         match item {
-            BlockItem::Declaration(d) => check_name(&d.node.name, d.node.name_span, vocab, out),
+            BlockItem::Declaration(d) => {
+                check_name(&d.node.name, d.node.name_span, vocab, out);
+                if matches!(vocab, Vocab::Property) {
+                    check_value(&d.node, out);
+                }
+            }
             BlockItem::Rule(r) => check_rule(r, out),
         }
     }
+}
+
+/// Report a property declaration whose value is certainly invalid.
+fn check_value(d: &parser::Declaration<'_>, out: &mut Vec<Diagnostic>) {
+    if check_declaration(d) != ValueCheck::Invalid {
+        return;
+    }
+    let (Some(first), Some(last)) = (d.value.first(), d.value.last()) else {
+        return;
+    };
+    out.push(Diagnostic {
+        span: Span::new(first.span.start, last.span.end),
+        kind: DiagnosticKind::InvalidValue,
+        name: d.name.to_string(),
+    });
 }
 
 /// Report `name` as unknown unless it is valid in `vocab` or exempt. Names are
@@ -231,8 +263,14 @@ mod tests {
     #[test]
     fn missing_semicolon_does_not_invent_a_property() {
         // With no `;`, `red font-eight: bold` is all one value per §5.4.5;
-        // `font-eight` is a value token here, not a property.
-        assert!(validate_stylesheet("p { color: red font-eight: bold }").is_empty());
+        // `font-eight` is a value token here, not a property. The value is
+        // then not a colour, which is what gets reported.
+        let d = validate_stylesheet("p { color: red font-eight: bold }");
+        assert_eq!(d.len(), 1);
+        assert_eq!(
+            (d[0].kind, d[0].name.as_str()),
+            (DiagnosticKind::InvalidValue, "color")
+        );
     }
 
     #[test]
@@ -419,5 +457,29 @@ mod tests {
             .map(|d| d.name)
             .collect();
         assert_eq!(names, vec!["colr", "bg"]);
+    }
+
+    #[test]
+    fn an_invalid_value_is_reported_with_the_value_span() {
+        let css = "p { width: banana !important; color: red; colr: 12px; width: var(--x) }\n\
+                   @font-face { font-weight: 100 900 }\n\
+                   @media print { q { font-style: bold } }";
+        let d = validate_stylesheet(css);
+        let got: Vec<_> = d
+            .iter()
+            .map(|d| (d.kind, d.name.as_str(), d.span.slice(css)))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (DiagnosticKind::InvalidValue, "width", "banana"),
+                (DiagnosticKind::UnknownProperty, "colr", "colr"),
+                (DiagnosticKind::InvalidValue, "font-style", "bold"),
+            ]
+        );
+        // The `style` attribute too.
+        let d = validate_declaration_list("height: 102; width: 1px");
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].kind, DiagnosticKind::InvalidValue);
     }
 }
