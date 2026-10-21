@@ -9,7 +9,9 @@
 
 pub mod at_rule;
 pub mod cascade;
+pub mod decode;
 mod descriptors;
+mod encodings;
 mod known_properties;
 pub mod matching;
 pub mod parser;
@@ -30,6 +32,10 @@ pub use at_rule::{
 pub use cascade::{
     Candidate, Cascade, ElementStyle, MAX_IMPORT_DEPTH, PropertyAnswer, Setter, Sheet,
     UnknownReason, UnknownReasons,
+};
+pub use decode::{
+    DecodeError, Decoded, EncodeError, Encoding, LabelSource, charset_rule, decode_stylesheet,
+    encode_stylesheet,
 };
 pub use matching::{Element, HTML_NAMESPACE, MAX_MATCH_STEPS, Match, Namespaces};
 pub use parser::{

@@ -41,6 +41,20 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   `layer()`, conditional under a media list or `supports()`. Only imports
   in their proper place count; cycles are followed once, nesting is bounded
   by `MAX_IMPORT_DEPTH`.
+- **Stylesheet decoding** (`decode` module). `decode_stylesheet(bytes,
+  protocol, environment)` follows CSS Syntax 3 §3.2 and the Encoding
+  Standard: byte order mark, protocol label, byte-exact `@charset "…";`
+  (`utf-16be`/`utf-16le` read as UTF-8), the referring document's encoding,
+  UTF-8. It returns the text (BOM removed, borrowed when the input is valid
+  UTF-8), the `Encoding` used, `had_bom`, and `lossless`: whether every
+  byte decoded. UTF-8, UTF-16BE/LE and all 28 single-byte encodings decode,
+  from tables generated from the WHATWG index files; a multi-byte legacy
+  encoding or `replacement` is `DecodeError::Unsupported`, with the label as
+  written and where it came from. `encode_stylesheet` writes text back in
+  the same encoding, so a lossless decode round-trips byte for byte.
+  `charset_rule` reads the declaration off the raw bytes, label as written,
+  even when decoding fails. `Encoding::for_label` is the standard's "get an
+  encoding", all 228 labels.
 - **`MediaQueryList::always_holds`**: an empty list, `all` or `only all`.
   `@media all` and `@media {…}` are no longer conditions in the cascade.
 
