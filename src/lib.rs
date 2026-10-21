@@ -24,6 +24,8 @@ pub mod span;
 pub mod token;
 pub mod tokenizer;
 pub mod validate;
+mod value_syntaxes;
+pub mod values;
 
 pub use at_rule::{
     ImportLayer, ImportRule, LayerName, LayerRule, MediaQualifier, MediaQuery, MediaQueryList,
@@ -62,4 +64,7 @@ pub use tokenizer::{SpannedTokens, Tokenizer};
 pub use validate::{
     Diagnostic, DiagnosticKind, validate_declaration_list, validate_parsed_block,
     validate_parsed_stylesheet, validate_stylesheet,
+};
+pub use values::{
+    MAX_VALUE_STEPS, MDN_DATA_VERSION, UnknownValue, ValueCheck, check_declaration, check_value,
 };

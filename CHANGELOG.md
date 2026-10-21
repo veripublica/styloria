@@ -67,6 +67,19 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   arguments included, escapes resolved, each with its span, its rule, and
   whether it is at the top level, inside an argument, or in a rule a browser
   drops (`#09 { }`).
+- **Value checking** (`values` module). `check_value(property, value)` and
+  `check_declaration` answer `Valid`, `Invalid` or `Unknown` with an
+  `UnknownValue` reason, against mdn-data's grammars (`MDN_DATA_VERSION`,
+  2.37.2) read in CSS Values 4's value definition syntax, with the base
+  types, units and math functions read natively and omitted commas handled
+  as §2.6 says. Invalid only when even a lenient match fails (undefined
+  types and unknown functions fit anything); `var()`/`env()`/`attr()`,
+  bad-url tokens, empty values, vendor-prefixed properties and values,
+  properties outside the `UnknownProperty` table and
+  `display: oeb-page-head`/`oeb-page-foot` are Unknown. CSS-wide keywords
+  fit everything. Bounded by `MAX_VALUE_STEPS`. Shelf: 88,442 style-rule
+  declarations in 0.42 s, 444 Invalid in 62 books; each of the 206
+  distinct invalid values is rejected by Firefox 158's `CSS.supports` too.
 - **`MediaQueryList::always_holds`**: an empty list, `all` or `only all`.
   `@media all` and `@media {…}` are no longer conditions in the cascade.
 
