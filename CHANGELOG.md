@@ -9,6 +9,17 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-10-21
+
+The cascade becomes a query: for each element and property, `Cascade` answers
+`Yes`, `No` or `Unknown`, with the reason an answer cannot be settled, and it
+follows CSS Nesting and `@import`. Alongside it come a shorthand table generated
+from MDN's data, stylesheet decoding and encoding as CSS Syntax 3 defines them,
+listings of the URLs and selectors a stylesheet references, and value checking
+against mdn-data's grammars, which reports `DiagnosticKind::InvalidValue`. This is
+a breaking release: `DiagnosticKind` gains a variant, so an exhaustive `match` must
+take it, and `type_selector_names` is replaced by `selector_references`.
+
 ### Added
 
 - **The cascade, as a query** (`cascade` module). `Cascade::new` takes a
