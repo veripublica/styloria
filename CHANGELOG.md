@@ -99,6 +99,17 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ### Changed
 
+- **Value verdicts are remembered** per thread (at most 8,192, keyed by the
+  property and what matching reads of the value), and the cached path
+  allocates nothing on a hit. Shelf: validate 51 → 7 ms a pass, cascade
+  build 56 → 12 ms, 64,404 `style` attributes 68 → 25 ms; verdicts
+  identical.
+- **The cascade tries only the rules an element can match**, found by the
+  id, class or name its selectors' subject requires, as browsers do.
+  `Element::each_class` (default: the `class` attribute) names the classes;
+  an implementation that overrides `has_class` overrides it too. Shelf:
+  `style_for` on 2.2 million elements 2.32 → 0.37 s, every candidate list
+  identical.
 - **The cascade drops an invalid declaration**, as a browser does:
   `width: banana` no longer sets `width`. An Unknown value still counts. On
   epublift's 39 books no answer changes; building the shelf's 878 cascades

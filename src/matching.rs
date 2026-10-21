@@ -147,6 +147,20 @@ pub trait Element: Clone {
         self.attribute("class")
             .is_some_and(|c| c.split(is_html_whitespace).any(|w| w == name))
     }
+
+    /// Calls `f` with each of the element's classes. The
+    /// [`Cascade`](crate::Cascade) tries only the rules that could match,
+    /// found by id, class and name, so this must name every class
+    /// [`has_class`](Self::has_class) accepts: an implementation that
+    /// overrides one overrides both. The default reads the `class`
+    /// attribute, as `has_class` does.
+    fn each_class(&self, f: &mut dyn FnMut(&str)) {
+        if let Some(c) = self.attribute("class") {
+            for w in c.split(is_html_whitespace).filter(|w| !w.is_empty()) {
+                f(w);
+            }
+        }
+    }
 }
 
 /// The namespace prefixes a stylesheet declares with `@namespace`, which a

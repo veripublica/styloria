@@ -95,11 +95,12 @@ use crate::matching::{Element, Match, Namespaces};
 use crate::parser::{self, AtRule, BlockItem, ComponentValue, Declaration, Rule, Stylesheet};
 use crate::properties::{logical_counterparts, longhands};
 use crate::selector::{
-    SelectorList, Specificity, parse_relative_selector_list, parse_selector_list,
+    SelectorList, SimpleSelector, Specificity, parse_relative_selector_list, parse_selector_list,
 };
 use crate::span::Spanned;
 use crate::token::Token;
 use crate::values::{ValueCheck, check_declaration};
+use std::collections::HashMap;
 
 /// One stylesheet given to the cascade.
 #[derive(Debug, Clone, Copy)]
@@ -191,6 +192,7 @@ impl UnknownReasons {
 #[derive(Debug)]
 pub struct Cascade<'s, 'a> {
     rules: Vec<CascadeRule<'s, 'a>>,
+    index: RuleIndex,
     namespaces: Vec<Namespaces<'a>>,
     /// For each layer, its place in the layer order; see `Layers`.
     layer_rank: Vec<u32>,
@@ -206,6 +208,101 @@ struct CascadeRule<'s, 'a> {
     sheet: usize,
     layer: usize,
     reasons: UnknownReasons,
+}
+
+/// The rules each element is worth trying, as a browser finds them: by the
+/// id, a class or the name the subject compound of one of their selectors
+/// requires. A rule with a selector that requires none of them (`*`,
+/// `:is(…)`, `::before`) is always tried. Rules are listed by index, so the
+/// ones an element gets are tried in the order they were written.
+#[derive(Debug, Default)]
+struct RuleIndex {
+    ids: HashMap<String, Vec<u32>>,
+    classes: HashMap<String, Vec<u32>>,
+    /// Lower-cased: in an HTML document names compare case-insensitively,
+    /// and matching sorts out the rest.
+    names: HashMap<String, Vec<u32>>,
+    always: Vec<u32>,
+}
+
+/// What a subject compound requires of the element.
+enum Key<'k> {
+    Id(&'k str),
+    Class(&'k str),
+    Name(&'k str),
+}
+
+impl RuleIndex {
+    fn new(rules: &[CascadeRule<'_, '_>]) -> RuleIndex {
+        let mut index = RuleIndex::default();
+        let add = |map: &mut HashMap<String, Vec<u32>>, k: String, r: u32| {
+            let list = map.entry(k).or_default();
+            if list.last() != Some(&r) {
+                list.push(r);
+            }
+        };
+        for (r, rule) in rules.iter().enumerate() {
+            let r = u32::try_from(r).unwrap_or(u32::MAX);
+            let mut always = false;
+            for s in &rule.selectors.selectors {
+                let subject = s.node.compounds.last().map(|c| &c.node.simples);
+                match subject.and_then(|simples| key(simples)) {
+                    Some(Key::Id(v)) => add(&mut index.ids, v.to_string(), r),
+                    Some(Key::Class(v)) => add(&mut index.classes, v.to_string(), r),
+                    Some(Key::Name(v)) => add(&mut index.names, v.to_ascii_lowercase(), r),
+                    None => always = true,
+                }
+            }
+            if always {
+                index.always.push(r);
+            }
+        }
+        index
+    }
+
+    /// The rules worth trying on `element`, by index, in order.
+    fn rules_for<E: Element>(&self, element: &E) -> Vec<u32> {
+        let mut out = self.always.clone();
+        if let Some(list) = element.id().and_then(|id| self.ids.get(id)) {
+            out.extend_from_slice(list);
+        }
+        if !self.classes.is_empty() {
+            element.each_class(&mut |c| {
+                if let Some(list) = self.classes.get(c) {
+                    out.extend_from_slice(list);
+                }
+            });
+        }
+        let name = element.local_name();
+        let list = if name.bytes().any(|b| b.is_ascii_uppercase()) {
+            self.names.get(&name.to_ascii_lowercase())
+        } else {
+            self.names.get(name)
+        };
+        if let Some(list) = list {
+            out.extend_from_slice(list);
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+}
+
+/// The most telling thing a compound requires: an id, else a class, else a
+/// name. `None` if it requires none of them.
+fn key<'k>(simples: &'k [Spanned<SimpleSelector<'_>>]) -> Option<Key<'k>> {
+    let mut found = None;
+    for s in simples {
+        match &s.node {
+            SimpleSelector::Id(v) => return Some(Key::Id(v)),
+            SimpleSelector::Class(v) if !matches!(found, Some(Key::Class(_))) => {
+                found = Some(Key::Class(v));
+            }
+            SimpleSelector::Type(n) if found.is_none() => found = Some(Key::Name(&n.local.node)),
+            _ => {}
+        }
+    }
+    found
 }
 
 /// One declaration that could apply to an element.
@@ -306,6 +403,7 @@ impl<'s, 'a> Cascade<'s, 'a> {
         }
         let layer_rank = b.layers.ranks();
         Cascade {
+            index: RuleIndex::new(&b.rules),
             rules: b.rules,
             namespaces: b.namespaces,
             unlayered: layer_rank.len() - 1,
@@ -328,7 +426,8 @@ impl<'s, 'a> Cascade<'s, 'a> {
         'a: 'e,
     {
         let mut candidates = Vec::new();
-        for r in &self.rules {
+        for r in self.index.rules_for(element) {
+            let r = &self.rules[r as usize];
             let ns = &self.namespaces[r.sheet];
             let mut best = Match::No;
             let mut specificity = Specificity::default();
@@ -1306,5 +1405,27 @@ mod tests {
         // The `style` attribute too.
         let c = cascade(&["img { width: 1px }"]);
         assert_eq!(ask(&c, IMG, Some("width: banana"), "width").1, "width: 1px");
+    }
+
+    #[test]
+    fn the_rule_index_misses_nothing_and_keeps_the_order() {
+        // `p#a.x`: one rule per way of being found, each later one equal or
+        // more specific, so the last that matches wins.
+        let css = "* { width: 1px } p { width: 2px } .x { width: 3px } #a { width: 4px }\
+                   :is(.x) { width: 5px } P { height: 1px } .nope, p { color: red }\
+                   #b, .x { margin: 0 } div.x { padding: 0 }";
+        let c = cascade(&[css]);
+        assert_eq!(ask(&c, P_A, None, "width").1, "width: 4px");
+        let style = c.style_for(&P_A, None);
+        let widths = style.property("width").setters.len();
+        assert_eq!(widths, 5);
+        // `P` is not `p` in XHTML: found, then rejected by matching.
+        assert_eq!(ask(&c, P_A, None, "height").0, Match::No);
+        assert_eq!(ask(&c, P_A, None, "color").0, Match::Yes);
+        assert_eq!(ask(&c, P_A, None, "margin-top").0, Match::Yes);
+        assert_eq!(ask(&c, P_A, None, "padding-top").0, Match::No);
+        // Equal specificity: the later rule wins, whichever bucket found it.
+        let c = cascade(&[".x { width: 1px } p { width: 2px } .x { width: 3px }"]);
+        assert_eq!(ask(&c, P_A, None, "width").1, "width: 3px");
     }
 }
