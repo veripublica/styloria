@@ -136,7 +136,11 @@ pub fn check_value(property: &str, value: &[Spanned<ComponentValue<'_>>]) -> Val
     if property.starts_with("--") {
         return ValueCheck::Valid;
     }
-    let property = property.to_ascii_lowercase();
+    let property: std::borrow::Cow<'_, str> = if property.bytes().any(|b| b.is_ascii_uppercase()) {
+        property.to_ascii_lowercase().into()
+    } else {
+        property.into()
+    };
     if property.starts_with('-') {
         return ValueCheck::Unknown(UnknownValue::PrefixedProperty);
     }
@@ -144,10 +148,189 @@ pub fn check_value(property: &str, value: &[Spanned<ComponentValue<'_>>]) -> Val
         return ValueCheck::Unknown(UnknownValue::UnknownProperty);
     }
     let items = significant(value);
+    cached(&property, &items)
+}
+
+/// The most verdicts [`cached`] keeps per thread; past it, it starts over.
+const CACHE_ENTRIES: usize = 8192;
+
+/// Remembered verdicts, and a buffer the next key is written into.
+#[derive(Default)]
+struct Cache {
+    verdicts: HashMap<Box<[u8]>, ValueCheck, Quick>,
+    key: Vec<u8>,
+}
+
+thread_local! {
+    static CACHE: std::cell::RefCell<Cache> = std::cell::RefCell::new(Cache::default());
+}
+
+/// [`uncached`], remembered. Stylesheets repeat themselves: the shelf's
+/// 88,442 declarations hold about 5,900 distinct values. The key is the
+/// property and everything matching reads of the value (see [`encode`]),
+/// so a remembered verdict is the one matching would give.
+fn cached(property: &str, items: &[&ComponentValue<'_>]) -> ValueCheck {
+    let hit = CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        let Cache { verdicts, key } = &mut *c;
+        key.clear();
+        key.extend_from_slice(property.as_bytes());
+        key.push(0);
+        if !encode(items.iter().copied(), key, MAX_VALUE_DEPTH) {
+            return Err(false);
+        }
+        verdicts.get(key.as_slice()).copied().ok_or(true)
+    });
+    let remember = match hit {
+        Ok(v) => return v,
+        Err(remember) => remember,
+    };
+    let verdict = uncached(property, items);
+    if remember {
+        CACHE.with(|c| {
+            let mut c = c.borrow_mut();
+            let Cache { verdicts, key } = &mut *c;
+            if verdicts.len() >= CACHE_ENTRIES {
+                verdicts.clear();
+            }
+            verdicts.insert(key.as_slice().into(), verdict);
+        });
+    }
+    verdict
+}
+
+/// Write what matching reads of `items` into `out`: each value's kind and
+/// content, functions and blocks with their contents, each list closed by an
+/// end mark; no spans and no whitespace (which matching skips too). Strings
+/// carry their length, so no content can pass for a mark. `false` past
+/// `depth`, where the value is not cached.
+fn encode<'v, 'a: 'v>(
+    items: impl Iterator<Item = &'v ComponentValue<'a>>,
+    out: &mut Vec<u8>,
+    depth: usize,
+) -> bool {
+    fn text(out: &mut Vec<u8>, s: &str) {
+        out.extend_from_slice(&(s.len() as u64).to_le_bytes());
+        out.extend_from_slice(s.as_bytes());
+    }
+    fn number(out: &mut Vec<u8>, value: f64, num_type: NumericType) {
+        out.extend_from_slice(&value.to_bits().to_le_bytes());
+        out.push(u8::from(num_type == NumericType::Integer));
+    }
+    fn significant_iter<'v, 'a>(
+        values: &'v [Spanned<ComponentValue<'a>>],
+    ) -> impl Iterator<Item = &'v ComponentValue<'a>> {
+        values
+            .iter()
+            .map(|v| &v.node)
+            .filter(|v| !matches!(v, ComponentValue::Token(Token::Whitespace)))
+    }
+    if depth == 0 {
+        return false;
+    }
+    for v in items {
+        match v {
+            ComponentValue::Function { name, args } => {
+                out.push(1);
+                text(out, name);
+                if !encode(significant_iter(args), out, depth - 1) {
+                    return false;
+                }
+            }
+            ComponentValue::Block(b) => {
+                out.push(2);
+                out.push(b.kind as u8);
+                if !encode(significant_iter(&b.values), out, depth - 1) {
+                    return false;
+                }
+            }
+            ComponentValue::Token(t) => match t {
+                Token::Ident(s) => {
+                    out.push(3);
+                    text(out, s);
+                }
+                Token::Function(s) => {
+                    out.push(4);
+                    text(out, s);
+                }
+                Token::AtKeyword(s) => {
+                    out.push(5);
+                    text(out, s);
+                }
+                Token::Hash { value, is_id } => {
+                    out.push(6);
+                    out.push(u8::from(*is_id));
+                    text(out, value);
+                }
+                Token::String(s) => {
+                    out.push(7);
+                    text(out, s);
+                }
+                Token::Url(s) => {
+                    out.push(8);
+                    text(out, s);
+                }
+                Token::BadUrl(s) => {
+                    out.push(9);
+                    text(out, s);
+                }
+                Token::Delim(c) => {
+                    out.push(10);
+                    out.extend_from_slice(&u32::from(*c).to_le_bytes());
+                }
+                Token::Number {
+                    value, num_type, ..
+                } => {
+                    out.push(11);
+                    number(out, *value, *num_type);
+                }
+                Token::Percentage { value, .. } => {
+                    out.push(12);
+                    out.extend_from_slice(&value.to_bits().to_le_bytes());
+                }
+                Token::Dimension {
+                    value,
+                    num_type,
+                    unit,
+                    ..
+                } => {
+                    out.push(13);
+                    number(out, *value, *num_type);
+                    text(out, unit);
+                }
+                Token::UnicodeRange { start, end } => {
+                    out.push(14);
+                    out.extend_from_slice(&start.to_le_bytes());
+                    out.extend_from_slice(&end.to_le_bytes());
+                }
+                Token::BadString => out.push(15),
+                Token::Whitespace => out.push(16),
+                Token::Cdo => out.push(17),
+                Token::Cdc => out.push(18),
+                Token::Colon => out.push(19),
+                Token::Semicolon => out.push(20),
+                Token::Comma => out.push(21),
+                Token::LeftSquare => out.push(22),
+                Token::RightSquare => out.push(23),
+                Token::LeftParen => out.push(24),
+                Token::RightParen => out.push(25),
+                Token::LeftCurly => out.push(26),
+                Token::RightCurly => out.push(27),
+            },
+        }
+    }
+    // The end of this list, so `f(a) b` and `f(a b)` differ.
+    out.push(0xFF);
+    true
+}
+
+/// [`check_value`] past the property checks, on the value's significant
+/// component values.
+fn uncached(property: &str, items: &[&ComponentValue<'_>]) -> ValueCheck {
     let Some(first) = items.first() else {
         return ValueCheck::Unknown(UnknownValue::Empty);
     };
-    if let Some(reason) = unknown_before_matching(&items, MAX_VALUE_DEPTH) {
+    if let Some(reason) = unknown_before_matching(items, MAX_VALUE_DEPTH) {
         return ValueCheck::Unknown(reason);
     }
     if let (1, ComponentValue::Token(Token::Ident(word))) = (items.len(), first) {
@@ -164,12 +347,12 @@ pub fn check_value(property: &str, value: &[Spanned<ComponentValue<'_>>]) -> Val
         }
     }
     let g = grammars();
-    let Some(Some(node)) = g.properties.get(property.as_str()) else {
+    let Some(Some(node)) = g.properties.get(property) else {
         return ValueCheck::Unknown(UnknownValue::NoGrammar);
     };
-    let budget = step_budget(&items, MAX_VALUE_DEPTH);
+    let budget = step_budget(items, MAX_VALUE_DEPTH);
     let strict = Matcher::new(g, false, budget);
-    let fits = strict.full(node, &items, 0);
+    let fits = strict.full(node, items, 0);
     if strict.exhausted.get() {
         return ValueCheck::Unknown(UnknownValue::TooComplex);
     }
@@ -177,13 +360,13 @@ pub fn check_value(property: &str, value: &[Spanned<ComponentValue<'_>>]) -> Val
         return ValueCheck::Valid;
     }
     let lenient = Matcher::new(g, true, budget);
-    let fits = lenient.full(node, &items, 0);
+    let fits = lenient.full(node, items, 0);
     if lenient.exhausted.get() {
         return ValueCheck::Unknown(UnknownValue::TooComplex);
     }
     if fits {
         ValueCheck::Unknown(UnknownValue::Unread)
-    } else if has_prefixed(&items, MAX_VALUE_DEPTH) {
+    } else if has_prefixed(items, MAX_VALUE_DEPTH) {
         ValueCheck::Unknown(UnknownValue::PrefixedValue)
     } else {
         ValueCheck::Invalid
@@ -318,7 +501,11 @@ impl Hasher for QuickHasher {
     }
 
     fn write(&mut self, bytes: &[u8]) {
-        for &b in bytes {
+        let (words, rest) = bytes.as_chunks::<8>();
+        for w in words {
+            self.write_u64(u64::from_le_bytes(*w));
+        }
+        for &b in rest {
             self.write_u64(u64::from(b));
         }
     }
