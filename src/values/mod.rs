@@ -53,6 +53,38 @@ pub const MDN_DATA_VERSION: &str = crate::value_syntaxes::MDN_DATA_VERSION;
 /// place in the value.
 pub const MAX_VALUE_STEPS: u32 = 1 << 16;
 
+/// Steps per component value, nested ones counted: the budget grows with
+/// the value, so a short value cannot take long. On the shelf's 88,442
+/// declarations the most any value took was 230 per component value.
+pub(crate) const STEPS_PER_VALUE: u32 = 1024;
+
+/// The budget for one value: [`STEPS_PER_VALUE`] per component value, at
+/// most [`MAX_VALUE_STEPS`].
+fn step_budget(items: &[&ComponentValue<'_>], depth: usize) -> u32 {
+    fn count(items: &[&ComponentValue<'_>], depth: usize) -> u32 {
+        let mut n = 0u32;
+        for v in items {
+            n = n.saturating_add(1);
+            if depth > 0 {
+                match v {
+                    ComponentValue::Function { args, .. } => {
+                        n = n.saturating_add(count(&significant(args), depth - 1));
+                    }
+                    ComponentValue::Block(b) => {
+                        n = n.saturating_add(count(&significant(&b.values), depth - 1));
+                    }
+                    ComponentValue::Token(_) => {}
+                }
+            }
+        }
+        n
+    }
+    count(items, depth)
+        .saturating_add(1)
+        .saturating_mul(STEPS_PER_VALUE)
+        .min(MAX_VALUE_STEPS)
+}
+
 /// How deep functions and blocks in a value are read.
 const MAX_VALUE_DEPTH: usize = 32;
 
@@ -134,7 +166,8 @@ pub fn check_value(property: &str, value: &[Spanned<ComponentValue<'_>>]) -> Val
     let Some(Some(node)) = g.properties.get(property.as_str()) else {
         return ValueCheck::Unknown(UnknownValue::NoGrammar);
     };
-    let strict = Matcher::new(g, false);
+    let budget = step_budget(&items, MAX_VALUE_DEPTH);
+    let strict = Matcher::new(g, false, budget);
     let fits = strict.full(node, &items, 0);
     if strict.exhausted.get() {
         return ValueCheck::Unknown(UnknownValue::TooComplex);
@@ -142,7 +175,7 @@ pub fn check_value(property: &str, value: &[Spanned<ComponentValue<'_>>]) -> Val
     if fits {
         return ValueCheck::Valid;
     }
-    let lenient = Matcher::new(g, true);
+    let lenient = Matcher::new(g, true, budget);
     let fits = lenient.full(node, &items, 0);
     if lenient.exhausted.get() {
         return ValueCheck::Unknown(UnknownValue::TooComplex);
@@ -290,11 +323,11 @@ struct List<'l, 'v, 'a> {
 }
 
 impl<'g> Matcher<'g> {
-    fn new(g: &'g Grammars, lenient: bool) -> Self {
+    fn new(g: &'g Grammars, lenient: bool, budget: u32) -> Self {
         Matcher {
             g,
             lenient,
-            steps: Cell::new(MAX_VALUE_STEPS),
+            steps: Cell::new(budget),
             exhausted: Cell::new(false),
         }
     }
@@ -316,6 +349,11 @@ impl<'g> Matcher<'g> {
     /// The positions `node` can end at, starting at `pos`; sorted, no
     /// repeats.
     fn ends(&self, l: &mut List<'_, '_, '_>, node: &Node, pos: usize) -> Vec<usize> {
+        // A keyword or a literal is one comparison: cheaper than the memo,
+        // and not worth a step. `<color>` alone offers 148 keywords.
+        if matches!(node, Node::Keyword(_) | Node::Literal(_)) {
+            return self.compute(l, node, pos);
+        }
         let key = (std::ptr::from_ref(node) as usize, pos);
         if let Some(e) = l.memo.get(&key) {
             return e.clone();

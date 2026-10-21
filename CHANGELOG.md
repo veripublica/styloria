@@ -77,8 +77,9 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   bad-url tokens, empty values, vendor-prefixed properties and values,
   properties outside the `UnknownProperty` table and
   `display: oeb-page-head`/`oeb-page-foot` are Unknown. CSS-wide keywords
-  fit everything. Bounded by `MAX_VALUE_STEPS`. Shelf: 88,442 style-rule
-  declarations in 0.42 s, 444 Invalid in 62 books; each of the 206
+  fit everything. Bounded by 1,024 steps per component value, at most
+  `MAX_VALUE_STEPS`; past it, Unknown. Shelf: 88,442 style-rule
+  declarations in 0.17 s, 444 Invalid in 62 books; each of the 206
   distinct invalid values is rejected by Firefox 158's `CSS.supports` too.
 - **`DiagnosticKind::InvalidValue`**: `validate_*` reports a property
   declaration whose value `check_declaration` finds certainly invalid, in
