@@ -3,12 +3,12 @@ name = "styloria"
 version = "0.13.0"
 edition = "2024"
 rust-version = "1.88"
-description = "A pure-Rust CSS3 tokenizer, parser, and serializer (CSS Syntax Level 3)."
+description = "A pure-Rust CSS parser (CSS Syntax Level 3) with selector matching, a cascade query, value validation, stylesheet decoding and a serializer."
 license = "AGPL-3.0-only OR LicenseRef-veripublica-Commercial"
 repository = "https://github.com/veripublica/styloria"
 homepage = "https://github.com/veripublica/styloria"
 readme = "README.md"
-keywords = ["css", "css3", "parser", "serializer", "tokenizer"]
+keywords = ["css", "css3", "parser", "selectors", "validation"]
 categories = ["parser-implementations", "web-programming"]
 
 [lib]

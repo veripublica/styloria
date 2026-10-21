@@ -1,5 +1,5 @@
 //! Per-at-rule descriptor vocabularies, from MDN's css/at-rules.json
-//! (https://github.com/mdn/data). Each at-rule below defines its own
+//! (<https://github.com/mdn/data>). Each at-rule below defines its own
 //! closed set of descriptor names; `validate` checks an at-rule's
 //! declarations against the matching set. Sorted, for binary search.
 //! Regenerated from the source, not hand-maintained.

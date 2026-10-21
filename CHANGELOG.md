@@ -25,9 +25,14 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   settled is Unknown and says why (`UnknownReason`): an Unknown selector, a
   rule inside `@media`/`@supports`/`@container`/`@scope`/`@document`/
   `@starting-style`, a conditional sheet, a nested style rule too large to
-  resolve, a logical
-  property standing for a physical one (or the reverse), a vendor prefix,
-  `revert`. Values are not checked.
+  resolve, a logical property standing for a physical one (or the reverse),
+  a vendor prefix, `revert`. A declaration whose value is certainly invalid
+  sets nothing.
+- **`longhands(name)`**: the longhands a shorthand sets, nested shorthands
+  expanded, from a table generated from MDN's data (mdn-data 2.37.2) and
+  completed with the reset-only sub-properties the specs name (`border`
+  resets `border-image`, `font` resets `font-variant-*` and
+  `font-size-adjust`, …).
 - **CSS Nesting in the cascade.** A nested style rule is resolved through
   its parent (`SelectorList::resolve_nesting`): `&` becomes `:is(parent)`
   and counts the parent list's highest specificity, a selector with no `&`
@@ -79,7 +84,7 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   `display: oeb-page-head`/`oeb-page-foot` are Unknown. CSS-wide keywords
   fit everything. Bounded by 1,024 steps per component value, at most
   `MAX_VALUE_STEPS`; past it, Unknown. Shelf: 88,442 style-rule
-  declarations in 63 ms, 444 Invalid in 62 books; each of the 206
+  declarations in 26 ms, 444 Invalid in 62 books; each of the 206
   distinct invalid values is rejected by Firefox 158's `CSS.supports` too.
 - **`DiagnosticKind::InvalidValue`**: `validate_*` reports a property
   declaration whose value `check_declaration` finds certainly invalid, in
@@ -99,6 +104,9 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ### Changed
 
+- **The cascade drops an invalid declaration**, as a browser does:
+  `width: banana` no longer sets `width`. An Unknown value still counts. On
+  epublift's 39 books no answer changes.
 - **Value verdicts are remembered** per thread (at most 8,192, keyed by the
   property and what matching reads of the value), and the cached path
   allocates nothing on a hit. Shelf: validate 51 → 7 ms a pass, cascade
@@ -110,22 +118,12 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   an implementation that overrides `has_class` overrides it too. Shelf:
   `style_for` on 2.2 million elements 2.32 → 0.37 s, every candidate list
   identical.
-- **The cascade drops an invalid declaration**, as a browser does:
-  `width: banana` no longer sets `width`. An Unknown value still counts. On
-  epublift's 39 books no answer changes; building the shelf's 878 cascades
-  takes 0.40 s instead of 8 ms, the value checks.
-
 - **Matching has a step budget** (`MAX_MATCH_STEPS`, 4096 compounds tried
   per call, arguments included); past it the answer is `Unknown`. Nested
   `:is()` with descendant combinators, which a resolved `&` produces,
   otherwise multiplies the work by the tree's depth per level: 255 nested
   rules took 15 s on one element, unbounded with `& &`. On the 562-book
   shelf (2.2 million elements) no answer changes.
-- **`longhands(name)`**: the longhands a shorthand sets, nested shorthands
-  expanded, from a table generated from MDN's data (mdn-data 2.37.2) and
-  completed with the reset-only sub-properties the specs name (`border`
-  resets `border-image`, `font` resets `font-variant-*` and
-  `font-size-adjust`, …).
 
 ## [0.13.0] - 2026-10-18
 

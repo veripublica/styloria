@@ -80,7 +80,7 @@
 //! its layer, under its conditions.
 //!
 //! A declaration whose value is certainly invalid
-//! ([`check_declaration`](crate::check_declaration) says
+//! ([`check_declaration`] says
 //! [`Invalid`](crate::ValueCheck::Invalid)) is dropped, as a browser drops
 //! it: `width: banana` sets nothing. One whose value is Unknown stays.
 //!

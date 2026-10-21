@@ -6,6 +6,21 @@
 //! nested rules in their blocks, component values — with a byte [`Span`] on
 //! every node, and every [`SyntaxError`] it recovered from.
 //! [`parse_block_contents`] does the same for a `style="…"` attribute.
+//!
+//! On top of the tree:
+//!
+//! - [`decode`]: bytes to text in CSS Syntax's order, and back
+//!   ([`decode_stylesheet`], [`encode_stylesheet`]).
+//! - [`selector`] and [`matching`]: selector trees with specificity, matched
+//!   three-valued against the caller's tree through [`Element`].
+//! - [`cascade`]: which declarations could set a property on an element, and
+//!   which decides ([`Cascade`]).
+//! - [`validate`] and [`values`]: unknown properties and descriptors, and
+//!   values that cannot fit their grammar ([`validate_parsed_stylesheet`],
+//!   [`check_value`]).
+//! - [`references`]: the URLs and selector names a stylesheet points at.
+//! - [`at_rule`]: the preludes of `@namespace`, `@import`, `@layer`, `@media`.
+//! - [`serialize`]: the tree back to CSS.
 
 pub mod at_rule;
 pub mod cascade;

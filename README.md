@@ -27,16 +27,37 @@ assert_eq!(rule.span.start_line_col(css), (1, 1));
   block is a list of declarations and nested rules in source order, whatever
   rule holds it. Which of them are *allowed* in a given context is left to
   the caller.
-- **Validation** (`validate` module) checks declaration *names* against the
-  CSS vocabulary: unknown properties in style rules and unknown descriptors
-  in at-rules (`@font-face`, `@counter-style`, `@page`, …), each with the span
-  to underline. Custom (`--*`) and vendor-prefixed names are exempt, and the
-  check errs toward silence. Selector lists are checked for syntax.
-  Value-level validation is a later layer.
+- **Decoding** (`decode` module) turns a stylesheet's bytes into text in CSS
+  Syntax's order (byte order mark, protocol label, `@charset`, the
+  referring document's encoding, UTF-8), and back: a lossless decode
+  encodes to the original bytes, so a tool can edit one rule and leave the
+  rest untouched. UTF-8, UTF-16 and every single-byte encoding of the
+  Encoding Standard; the others are an error, never a guess.
+- **Selectors** (`selector` module) are read into a tree with specificity,
+  and **matched** (`matching` module) against the caller's own document
+  tree through a small `Element` trait. The answer is three-valued: `Yes`,
+  `No`, or `Unknown` when it depends on something a static tree does not
+  say (`:hover`, `:has()`).
+- **The cascade** (`cascade` module) answers which declarations could set a
+  property on an element, highest precedence first, and which one decides:
+  `!important`, the `style` attribute, `@layer`, specificity, order, CSS
+  Nesting, `@import`, shorthands and their longhands. What cannot be
+  settled (a rule inside `@media`, an Unknown selector) is `Unknown`, with
+  the reason.
+- **Validation** (`validate` and `values` modules) reports unknown
+  properties and descriptors, and values that cannot fit their property's
+  grammar (`color: 12px`), each with the span to underline. The grammars
+  are mdn-data's. It errs toward silence: a value is invalid only when even
+  a lenient reading fails, and custom properties, vendor prefixes and
+  `var()` are left alone.
+- **References** (`references` module): every URL a stylesheet names, with
+  its context, and every element name, class, id and attribute its
+  selectors name, escapes resolved.
 - **Serialization** (`serialize` module) writes the tree back as equivalent
   CSS.
-- Nesting is bounded (`MAX_NESTING_DEPTH`), and parsing stays linear on
-  hostile input, so no stylesheet can exhaust the stack or the clock.
+- **Bounded on hostile input.** Nesting has a depth limit, matching and
+  value checks have step budgets, and parsing stays linear, so no
+  stylesheet can exhaust the stack or the clock. No dependencies.
 
 ## Why
 

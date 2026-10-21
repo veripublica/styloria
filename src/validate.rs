@@ -29,7 +29,7 @@
 //!
 //! **Values.** A property declaration whose value cannot fit the property's
 //! grammar is an [`InvalidValue`](DiagnosticKind::InvalidValue), judged by
-//! [`check_declaration`](crate::check_declaration): only a certain
+//! [`check_declaration`]: only a certain
 //! [`Invalid`](crate::ValueCheck::Invalid), never an Unknown one. Descriptors
 //! have grammars of their own and are not value-checked.
 //!
