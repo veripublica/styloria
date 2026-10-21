@@ -55,8 +55,26 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   `charset_rule` reads the declaration off the raw bytes, label as written,
   even when decoding fails. `Encoding::for_label` is the standard's "get an
   encoding", all 228 labels.
+- **References** (`references` module). `url_references(sheet)` lists every
+  URL in source order, at any depth: the value as CSS reads it, the span of
+  the whole construct, its form (`url()` token or function, `src()`, a bare
+  string where one is a URL: `@import`, `@namespace`, `image-set()`, or a
+  bad-url token with its text) and its context (`@import`, `@namespace`, a
+  declaration's property and the at-rule holding a descriptor, a prelude).
+  `block_url_references` does the same for a `style` attribute.
+  `selector_references(sheet)` lists every type, class, id and attribute
+  selector in every style rule, nested and conditional ones and pseudo-class
+  arguments included, escapes resolved, each with its span, its rule, and
+  whether it is at the top level, inside an argument, or in a rule a browser
+  drops (`#09 { }`).
 - **`MediaQueryList::always_holds`**: an empty list, `all` or `only all`.
   `@media all` and `@media {…}` are no longer conditions in the cascade.
+
+### Removed
+
+- **`type_selector_names`**: `selector_references` gives the same names
+  (`top_level` and `in_argument` tell where they stand), with classes, ids
+  and attributes besides.
 
 ### Changed
 

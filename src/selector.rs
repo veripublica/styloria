@@ -614,39 +614,17 @@ fn into_result<'a>(
     }
 }
 
-/// Every **type selector** name in a qualified rule's prelude, with its span.
-///
-/// A type selector is an element name written bare at the head of a compound
-/// selector — the `h4` in `h4.note`, `div` in `div > p`. Namespace-qualified
-/// forms (`svg|circle`) yield the local name; the universal selector `*`
-/// yields nothing, and neither do class, id, attribute or pseudo parts, nor
-/// names inside `:not()` and its kin.
-///
-/// This reports *what the selector names*, not whether the name is a real
-/// element — that judgement needs a vocabulary this crate does not have and
-/// belongs to the caller. It exists for lint layers that want to say "this
-/// stylesheet targets `h4a`, which is not an element in any vocabulary the
-/// document can use"; a typo for `h4` or for `.h4a` is valid CSS and matches
-/// nothing, so it is invisible without a check like that.
-///
-/// The prelude is read as a relative list, which accepts every style rule's
-/// prelude wherever it sits. A selector with a structure error still
-/// names what it names; one with a token error is skipped. The names in the
-/// others come back either way.
-pub fn type_selector_names<'a>(
+/// Every selector in a prelude that names something, for
+/// [`selector_references`](crate::selector_references): read as a relative
+/// list when `relative`, keeping a selector with a structure error (it still
+/// names what it names) and skipping one with a token error. The flag says
+/// whether the list had any error, which drops the rule.
+pub(crate) fn parse_selector_list_lenient<'a>(
     prelude: &[Spanned<ComponentValue<'a>>],
-) -> Vec<Spanned<Cow<'a, str>>> {
-    list(prelude, true, 0, true)
-        .0
-        .selectors
-        .into_iter()
-        .flat_map(|c| c.node.compounds)
-        .flat_map(|c| c.node.simples)
-        .filter_map(|s| match s.node {
-            SimpleSelector::Type(name) => Some(name.local),
-            _ => None,
-        })
-        .collect()
+    relative: bool,
+) -> (SelectorList<'a>, bool) {
+    let (list, errors) = list(prelude, relative, 0, true);
+    (list, !errors.is_empty())
 }
 
 /// The selectors that parsed, and the errors for those that did not. With
@@ -1438,45 +1416,6 @@ mod tests {
     fn spec(selector: &str) -> (u32, u32, u32) {
         let s = parse(selector).specificity();
         (s.ids, s.classes, s.types)
-    }
-
-    fn type_names(css: &str) -> Vec<String> {
-        let (sheet, _) = crate::parse_stylesheet(css);
-        let mut out = Vec::new();
-        for rule in &sheet.rules {
-            if let crate::Rule::Qualified(q) = &rule.node {
-                out.extend(
-                    super::type_selector_names(&q.prelude)
-                        .into_iter()
-                        .map(|s| s.node.into_owned()),
-                );
-            }
-        }
-        out
-    }
-
-    /// `type_selector_names` reports the element name at the head of each
-    /// compound and nothing else — the input a vocabulary-aware lint needs.
-    #[test]
-    fn type_selector_names_are_the_compound_heads() {
-        assert_eq!(type_names("h4a{color:red}"), ["h4a"]);
-        assert_eq!(type_names("div>p{color:red}"), ["div", "p"]);
-        assert_eq!(type_names("h1,h2{color:red}"), ["h1", "h2"]);
-        assert_eq!(type_names("h4.note em{color:red}"), ["h4", "em"]);
-        // A namespace-qualified name yields the local part.
-        assert_eq!(type_names("svg|circle{fill:red}"), ["circle"]);
-        // Nothing that isn't a type selector.
-        assert_eq!(type_names(".note{color:red}"), Vec::<String>::new());
-        assert_eq!(type_names("#id{color:red}"), Vec::<String>::new());
-        assert_eq!(type_names("*{color:red}"), Vec::<String>::new());
-        assert_eq!(type_names("[hidden]{color:red}"), Vec::<String>::new());
-        assert_eq!(type_names(":root{color:red}"), Vec::<String>::new());
-        // The head only: `p.a.b` names `p` once, not its classes.
-        assert_eq!(type_names("p.a.b{color:red}"), ["p"]);
-        // A selector with a token error is skipped; its neighbour still
-        // counts. One with only a structure error still names what it names.
-        assert_eq!(type_names("h4a, . x{color:red}"), ["h4a"]);
-        assert_eq!(type_names("#1a h4a{color:red}"), ["h4a"]);
     }
 
     /// The tree for one everyday selector, node by node.
