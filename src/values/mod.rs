@@ -36,6 +36,7 @@ mod grammar;
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::OnceLock;
 
 use crate::known_properties::is_known_property;
@@ -253,10 +254,10 @@ fn has_prefixed(items: &[&ComponentValue<'_>], depth: usize) -> bool {
 
 /// Every grammar, read once.
 struct Grammars {
-    properties: HashMap<&'static str, Option<Node>>,
-    types: HashMap<&'static str, Option<Node>>,
+    properties: HashMap<&'static str, Option<Node>, Quick>,
+    types: HashMap<&'static str, Option<Node>, Quick>,
     /// Every function a grammar names, and the math functions.
-    functions: HashSet<String>,
+    functions: HashSet<String, Quick>,
 }
 
 fn grammars() -> &'static Grammars {
@@ -265,11 +266,11 @@ fn grammars() -> &'static Grammars {
         let read = |list: &'static [(&'static str, &'static str)]| {
             list.iter()
                 .map(|(n, s)| (*n, grammar::parse(s)))
-                .collect::<HashMap<_, _>>()
+                .collect::<HashMap<_, _, Quick>>()
         };
         let properties = read(PROPERTY_SYNTAXES);
         let types = read(TYPE_SYNTAXES);
-        let mut functions: HashSet<String> = MATH.iter().map(|m| m.to_string()).collect();
+        let mut functions: HashSet<String, Quick> = MATH.iter().map(|m| m.to_string()).collect();
         for name in TYPE_SYNTAXES
             .iter()
             .filter_map(|(n, _)| n.strip_suffix("()"))
@@ -287,7 +288,7 @@ fn grammars() -> &'static Grammars {
     })
 }
 
-fn collect_functions(node: &Node, out: &mut HashSet<String>) {
+fn collect_functions(node: &Node, out: &mut HashSet<String, Quick>) {
     match node {
         Node::Function(name, inner) => {
             out.insert(name.to_ascii_lowercase());
@@ -304,6 +305,39 @@ fn collect_functions(node: &Node, out: &mut HashSet<String>) {
     }
 }
 
+/// A multiply-rotate hash for the matcher's own tables, whose keys are
+/// grammar-node addresses and positions. The tables are bounded by the step
+/// budget, so they need no protection against chosen collisions, and
+/// SipHash was half the time of checking a stylesheet.
+#[derive(Default)]
+struct QuickHasher(u64);
+
+impl Hasher for QuickHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_u64(u64::from(b));
+        }
+    }
+
+    fn write_u64(&mut self, n: u64) {
+        self.0 = (self.0.rotate_left(5) ^ n).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+
+    fn write_u32(&mut self, n: u32) {
+        self.write_u64(u64::from(n));
+    }
+
+    fn write_usize(&mut self, n: usize) {
+        self.write_u64(n as u64);
+    }
+}
+
+type Quick = BuildHasherDefault<QuickHasher>;
+
 /// The most alternatives `&&` and `||` take (one bit each).
 const MAX_ANY_ORDER: usize = 32;
 
@@ -318,7 +352,7 @@ struct Matcher<'g> {
 /// for a grammar node at a position, the positions it can end at.
 struct List<'l, 'v, 'a> {
     items: &'l [&'v ComponentValue<'a>],
-    memo: HashMap<(usize, usize), Vec<usize>>,
+    memo: HashMap<(usize, usize), Vec<usize>, Quick>,
     depth: usize,
 }
 
@@ -340,7 +374,7 @@ impl<'g> Matcher<'g> {
         }
         let mut list = List {
             items,
-            memo: HashMap::new(),
+            memo: HashMap::with_capacity_and_hasher(64, Quick::default()),
             depth,
         };
         self.ends(&mut list, node, 0).contains(&items.len())
@@ -354,14 +388,32 @@ impl<'g> Matcher<'g> {
         if matches!(node, Node::Keyword(_) | Node::Literal(_)) {
             return self.compute(l, node, pos);
         }
-        let key = (std::ptr::from_ref(node) as usize, pos);
-        if let Some(e) = l.memo.get(&key) {
-            return e.clone();
-        }
         let Some(left) = self.steps.get().checked_sub(1) else {
             self.exhausted.set(true);
             return Vec::new();
         };
+        // Only what can be reached twice at one place is remembered: a named
+        // type or property (which is also how a grammar reaching itself is
+        // stopped), and the alternatives of `&&`, `||` and repetitions.
+        let shared = matches!(
+            node,
+            Node::Type { .. }
+                | Node::Property(_)
+                | Node::AnyOf(_)
+                | Node::AllOf(_)
+                | Node::Repeat { .. }
+        );
+        if !shared {
+            self.steps.set(left);
+            let mut out = self.compute(l, node, pos);
+            out.sort_unstable();
+            out.dedup();
+            return out;
+        }
+        let key = (std::ptr::from_ref(node) as usize, pos);
+        if let Some(e) = l.memo.get(&key) {
+            return e.clone();
+        }
         self.steps.set(left);
         // A grammar that reaches itself without consuming anything ends
         // nowhere on the inner visit.
@@ -413,7 +465,25 @@ impl<'g> Matcher<'g> {
                 }
             }
             Node::Seq(items) => self.seq(l, items, pos),
-            Node::OneOf(alts) => alts.iter().flat_map(|a| self.ends(l, a, pos)).collect(),
+            Node::OneOf(alts) => {
+                // Keywords, often most of the list, compared in place.
+                let ident = match item {
+                    Some(ComponentValue::Token(Token::Ident(w))) => Some(w),
+                    _ => None,
+                };
+                let mut out = Vec::new();
+                for a in alts {
+                    match a {
+                        Node::Keyword(k) => {
+                            if ident.is_some_and(|w| w.eq_ignore_ascii_case(k)) {
+                                out.push(pos + 1);
+                            }
+                        }
+                        _ => out.extend(self.ends(l, a, pos)),
+                    }
+                }
+                out
+            }
             Node::AnyOf(alts) => self.any_order(l, alts, pos, false),
             Node::AllOf(alts) => self.any_order(l, alts, pos, true),
             Node::Repeat {
@@ -572,7 +642,7 @@ impl<'g> Matcher<'g> {
             self.exhausted.set(true);
             return Vec::new();
         }
-        let mut seen: HashSet<(u32, usize)> = HashSet::new();
+        let mut seen: HashSet<(u32, usize), Quick> = HashSet::default();
         let mut todo = vec![(0u32, pos)];
         let mut out = Vec::new();
         while let Some((mask, p)) = todo.pop() {
@@ -625,7 +695,7 @@ impl<'g> Matcher<'g> {
             out.push(pos);
         }
         let mut frontier = vec![pos];
-        let mut reached: HashSet<usize> = HashSet::new();
+        let mut reached: HashSet<usize, Quick> = HashSet::default();
         let cap = max.unwrap_or(u32::MAX);
         let mut count = 0u32;
         while count < cap && !frontier.is_empty() {

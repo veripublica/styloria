@@ -79,7 +79,7 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   `display: oeb-page-head`/`oeb-page-foot` are Unknown. CSS-wide keywords
   fit everything. Bounded by 1,024 steps per component value, at most
   `MAX_VALUE_STEPS`; past it, Unknown. Shelf: 88,442 style-rule
-  declarations in 0.17 s, 444 Invalid in 62 books; each of the 206
+  declarations in 63 ms, 444 Invalid in 62 books; each of the 206
   distinct invalid values is rejected by Firefox 158's `CSS.supports` too.
 - **`DiagnosticKind::InvalidValue`**: `validate_*` reports a property
   declaration whose value `check_declaration` finds certainly invalid, in
