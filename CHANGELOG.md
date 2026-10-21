@@ -9,6 +9,15 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-10-21
+
+Descriptor values are checked against their at-rule's grammar: `check_descriptor`
+answers for `@font-face`, `@counter-style`, `@page` and the other descriptor
+at-rules, reporting `DiagnosticKind::InvalidValue` where a value is certainly
+invalid, and `@font-face`'s `src` follows CSS Fonts 4. Parsing is 11% faster. This
+release is additive: no enum gains a variant, but `validate` reports new
+`InvalidValue` diagnostics inside descriptor at-rules, where 0.14 was silent.
+
 ### Added
 
 - **Descriptor values are checked** against their at-rule's grammar:
