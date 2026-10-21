@@ -636,8 +636,11 @@ impl<'a> Parser<'a> {
         nested: bool,
     ) -> Spanned<Rule<'a>> {
         let prelude = self.values_until(brace);
+        let plain = |relative| crate::selector::is_plain_selector_list(&prelude, relative);
         if self.report {
             match ctx {
+                Context::Style if plain(false) => {}
+                Context::Nested if plain(true) => {}
                 Context::Style => {
                     if let Err(e) = crate::selector::parse_selector_list(&prelude) {
                         self.errors.extend(e);

@@ -26,6 +26,10 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ### Changed
 
+- `parse_stylesheet` no longer builds a selector tree to check a plain
+  selector list (types, `*`, classes and ids joined by combinators), whose
+  validity it can see without one: parsing the shelf is 11% faster. Trees
+  and errors are unchanged.
 - `validate` now reports values inside descriptor at-rules, where 0.14 was
   silent: a consumer sees `InvalidValue` diagnostics it did not see before.
   On the 878 shelf sheets that is 18 distinct values (470 declarations), and

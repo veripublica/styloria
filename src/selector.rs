@@ -604,6 +604,63 @@ pub fn parse_relative_selector_list<'a>(
     into_result(list(prelude, true, 0, false))
 }
 
+/// Whether a prelude is certainly a valid selector list of the plainest
+/// kind: compounds of an optional type or `*`, then classes and ids, joined
+/// by whitespace, `>`, `+` and `~`, separated by commas. Builds nothing, so
+/// the parser can skip [`parse_selector_list`] for most style rules. `false`
+/// means only "not that plain": the full parser decides.
+pub(crate) fn is_plain_selector_list(prelude: &Values<'_>, relative: bool) -> bool {
+    let tok = |i: usize| match prelude.get(i).map(|v| &v.node) {
+        Some(ComponentValue::Token(t)) => Some(t),
+        _ => None,
+    };
+    let is_combinator = |i: usize| matches!(tok(i), Some(Token::Delim('>' | '+' | '~')));
+    let mut i = 0;
+    loop {
+        // A complex selector; in a relative one, a combinator may lead.
+        i = skip_ws(prelude, i);
+        if relative && is_combinator(i) {
+            i = skip_ws(prelude, i + 1);
+        }
+        loop {
+            // A compound, which must not be empty.
+            let start = i;
+            if matches!(tok(i), Some(Token::Ident(_) | Token::Delim('*'))) {
+                i += 1;
+            }
+            loop {
+                match tok(i) {
+                    Some(Token::Delim('.')) if matches!(tok(i + 1), Some(Token::Ident(_))) => {
+                        i += 2
+                    }
+                    Some(Token::Hash { is_id: true, .. }) => i += 1,
+                    _ => break,
+                }
+            }
+            if i == start {
+                return false;
+            }
+            // Then the end, a comma, a combinator or whitespace. Anything
+            // else (`|`, `:`, `[`, a function) is not plain.
+            let next = skip_ws(prelude, i);
+            if next == prelude.len() {
+                return true;
+            }
+            if matches!(tok(next), Some(Token::Comma)) {
+                i = next + 1;
+                break;
+            }
+            if is_combinator(next) {
+                i = skip_ws(prelude, next + 1);
+            } else if next > i {
+                i = next;
+            } else {
+                return false;
+            }
+        }
+    }
+}
+
 fn into_result<'a>(
     (list, errors): (SelectorList<'a>, Vec<SyntaxError>),
 ) -> Result<SelectorList<'a>, Vec<SyntaxError>> {
@@ -1382,6 +1439,51 @@ fn combinator(cv: &ComponentValue<'_>) -> Option<Combinator> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_plain_list_is_one_the_full_parser_accepts() {
+        // Random preludes from pieces near the plain grammar's edges: every
+        // one the fast path calls plain must parse with no error, as a
+        // plain list and as a relative one.
+        const PIECES: &[&str] = &[
+            "a", "div", "*", ".", "b", "#x", "#1", " ", ">", "+", "~", ",", "|", ":", "hover", "[",
+            "]", "&", "::", "-", "--x", "\\31 ", "u", "1", "(", ")", ".5", "\t", "/**/", "x|",
+            "*|", "#-", "#--", ".-a",
+        ];
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+        let (mut plain, mut tried) = (0, 0);
+        for _ in 0..200_000 {
+            let len = 1 + next(8);
+            let prelude: String = (0..len).map(|_| PIECES[next(PIECES.len())]).collect();
+            let css = format!("{prelude} {{}}");
+            let sheet = crate::parse_stylesheet(&css).0;
+            let [rule] = sheet.rules.as_slice() else {
+                continue;
+            };
+            let crate::Rule::Qualified(q) = &rule.node else {
+                continue;
+            };
+            tried += 1;
+            for relative in [false, true] {
+                if is_plain_selector_list(&q.prelude, relative) {
+                    plain += 1;
+                    let full = if relative {
+                        parse_relative_selector_list(&q.prelude)
+                    } else {
+                        parse_selector_list(&q.prelude)
+                    };
+                    assert!(full.is_ok(), "{prelude:?} relative={relative}: {full:?}");
+                }
+            }
+        }
+        assert!(plain > 10_000 && tried > 100_000, "{plain} of {tried}");
+    }
     use crate::parser::{SyntaxErrorKind, syntax_errors};
 
     /// Every selector error the module reports, for one stylesheet.
