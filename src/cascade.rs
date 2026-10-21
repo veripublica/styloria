@@ -166,14 +166,17 @@ impl UnknownReasons {
         if cond { self.with(r) } else { self }
     }
 
+    /// No reason: the answer is settled.
     pub fn is_empty(self) -> bool {
         self.0 == 0
     }
 
+    /// Whether `r` is one of the reasons.
     pub fn contains(self, r: UnknownReason) -> bool {
         self.0 & Self::bit(r) != 0
     }
 
+    /// The reasons, in [`UnknownReason`]'s declaration order.
     pub fn iter(self) -> impl Iterator<Item = UnknownReason> {
         ALL_REASONS.into_iter().filter(move |r| self.contains(*r))
     }

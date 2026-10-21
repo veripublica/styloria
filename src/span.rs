@@ -17,14 +17,17 @@ pub struct Span {
 }
 
 impl Span {
+    /// The span `[start, end)`.
     pub fn new(start: usize, end: usize) -> Span {
         Span { start, end }
     }
 
+    /// Its length in bytes.
     pub fn len(&self) -> usize {
         self.end.saturating_sub(self.start)
     }
 
+    /// Whether it covers no bytes.
     pub fn is_empty(&self) -> bool {
         self.start >= self.end
     }
@@ -71,6 +74,7 @@ pub struct Spanned<T> {
 }
 
 impl<T> Spanned<T> {
+    /// `node` with `span` attached.
     pub fn new(node: T, span: Span) -> Spanned<T> {
         Spanned { node, span }
     }

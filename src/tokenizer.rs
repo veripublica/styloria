@@ -26,6 +26,8 @@ use std::borrow::Cow;
 use crate::span::{Span, Spanned};
 use crate::token::{NumericType, Token};
 
+/// A tokenizer over one input string. As an [`Iterator`] it yields the
+/// tokens; [`spanned`](Tokenizer::spanned) yields them with their spans.
 pub struct Tokenizer<'a> {
     input: &'a str,
     pos: usize,
@@ -37,6 +39,7 @@ pub struct Tokenizer<'a> {
 }
 
 impl<'a> Tokenizer<'a> {
+    /// A tokenizer at the start of `input`. A leading U+FEFF is skipped.
     pub fn new(input: &'a str) -> Self {
         // A leading U+FEFF is a byte-order mark, not content. CSS Syntax
         // §3.2 consumes it while *determining the encoding*, so by the time

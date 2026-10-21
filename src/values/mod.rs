@@ -17,7 +17,8 @@
 //!
 //! - a property not in the table behind
 //!   [`DiagnosticKind::UnknownProperty`](crate::DiagnosticKind::UnknownProperty),
-//!   or one without a grammar; a vendor-prefixed property;
+//!   or one without a grammar, or a descriptor its at-rule does not define;
+//!   a vendor-prefixed property;
 //! - a value using `var()`, `env()`, `attr()`, `if()` or `inherit()`, whose
 //!   meaning is known only when it is computed;
 //! - a value holding a bad-url or bad-string token, already a syntax error;

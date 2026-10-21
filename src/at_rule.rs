@@ -108,6 +108,7 @@ impl MediaQueryList<'_> {
     }
 }
 
+/// The `not` or `only` before a media type (`not print`, `only screen`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaQualifier {
     Not,

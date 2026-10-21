@@ -59,6 +59,7 @@ pub(crate) enum Kind {
 }
 
 impl Encoding {
+    /// UTF-8, the encoding a stylesheet falls back to.
     pub const UTF_8: Encoding = Encoding(0);
 
     /// The encoding a label names (the Encoding Standard's "get an
@@ -125,6 +126,7 @@ pub enum LabelSource {
     Environment,
 }
 
+/// Why [`decode_stylesheet`] could not decode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecodeError {
     /// The label names an encoding this crate does not decode: a multi-byte
@@ -153,6 +155,7 @@ impl std::fmt::Display for DecodeError {
 
 impl std::error::Error for DecodeError {}
 
+/// Why [`encode_stylesheet`] could not encode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EncodeError {
     /// The encoding is not one this crate encodes.

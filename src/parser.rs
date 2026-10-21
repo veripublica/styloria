@@ -95,6 +95,7 @@ pub struct AtRule<'a> {
     pub block: Option<Block<'a>>,
 }
 
+/// A rule: a qualified rule (`p { … }`) or an at-rule (`@media … { … }`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Rule<'a> {
     Qualified(QualifiedRule<'a>),
@@ -146,6 +147,7 @@ pub enum BlockItem<'a> {
 }
 
 impl BlockItem<'_> {
+    /// The item's span, whichever kind it is.
     pub fn span(&self) -> Span {
         match self {
             BlockItem::Declaration(d) => d.span,

@@ -17,6 +17,7 @@ pub enum NumericType {
     Number,
 }
 
+/// A token, as CSS Syntax Level 3 §4 defines them.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token<'a> {
     Ident(Cow<'a, str>),
@@ -101,6 +102,8 @@ impl<'a> Token<'a> {
         )
     }
 
+    /// The token that closes a block this one opens: `}` for `{`, and so
+    /// on. `None` for any other token.
     pub fn matching_close(&self) -> Option<Token<'static>> {
         match self {
             Token::LeftCurly => Some(Token::RightCurly),

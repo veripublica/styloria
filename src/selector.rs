@@ -353,6 +353,8 @@ impl ComplexSelector<'_> {
 }
 
 impl SimpleSelector<'_> {
+    /// This simple selector's specificity. `&` counts as zero, as in
+    /// [`ComplexSelector::specificity`].
     pub fn specificity(&self) -> Specificity {
         match self {
             SimpleSelector::Type(_) | SimpleSelector::PseudoElement(_) => Specificity::TYPE,

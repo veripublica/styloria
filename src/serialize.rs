@@ -65,10 +65,14 @@ fn serialize_name(s: &str, out: &mut String, check_leading_digit: bool) {
     }
 }
 
+/// Append `s` as an identifier, escaped so it re-tokenizes as the same
+/// ident.
 pub fn serialize_ident(s: &str, out: &mut String) {
     serialize_name(s, out, true);
 }
 
+/// Append `s` as a double-quoted string, escaped so it re-tokenizes as the
+/// same string.
 pub fn serialize_string(s: &str, out: &mut String) {
     out.push('"');
     for c in s.chars() {
@@ -121,6 +125,7 @@ fn serialize_dimension_unit(unit: &str, out: &mut String) {
     serialize_name(unit, out, false);
 }
 
+/// Append one token. A function token writes its name and `(`.
 pub fn serialize_token(t: &Token, out: &mut String) {
     match t {
         Token::Ident(s) => serialize_ident(s, out),
@@ -180,6 +185,8 @@ pub fn serialize_token(t: &Token, out: &mut String) {
     }
 }
 
+/// Append one component value: a token, a function with its arguments and
+/// `)`, or a simple block with its brackets.
 pub fn serialize_component_value(v: &ComponentValue, out: &mut String) {
     match v {
         ComponentValue::Token(t) => serialize_token(t, out),
@@ -201,6 +208,7 @@ pub fn serialize_values(values: &[Spanned<ComponentValue>], out: &mut String) {
     }
 }
 
+/// Append a `{ … }`, `[ … ]` or `( … )` block.
 pub fn serialize_simple_block(b: &SimpleBlock, out: &mut String) {
     let (open, close) = match b.kind {
         BlockKind::Curly => ('{', '}'),
@@ -212,6 +220,7 @@ pub fn serialize_simple_block(b: &SimpleBlock, out: &mut String) {
     out.push(close);
 }
 
+/// Append `name:value`, with `!important` when set and no trailing `;`.
 pub fn serialize_declaration(d: &Declaration, out: &mut String) {
     serialize_ident(&d.name, out);
     out.push(':');
@@ -233,6 +242,7 @@ fn serialize_items(items: &[BlockItem], out: &mut String) {
     }
 }
 
+/// Append a rule with its block, or with `;` for a statement at-rule.
 pub fn serialize_rule(r: &Rule, out: &mut String) {
     match r {
         Rule::Qualified(q) => serialize_values(&q.prelude, out),
@@ -252,6 +262,8 @@ pub fn serialize_rule(r: &Rule, out: &mut String) {
     }
 }
 
+/// The whole stylesheet as equivalent CSS: comments and whitespace are not
+/// kept, so it reads back to the same rules and values, at other spans.
 pub fn serialize_stylesheet(sheet: &Stylesheet) -> String {
     let mut out = String::new();
     for r in &sheet.rules {
