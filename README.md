@@ -46,7 +46,8 @@ assert_eq!(rule.span.start_line_col(css), (1, 1));
   the reason.
 - **Validation** (`validate` and `values` modules) reports unknown
   properties and descriptors, and values that cannot fit their property's
-  grammar (`color: 12px`), each with the span to underline. The grammars
+  or descriptor's grammar (`color: 12px`, `@font-face { font-display: fast }`),
+  each with the span to underline. The grammars
   are mdn-data's. It errs toward silence: a value is invalid only when even
   a lenient reading fails, and custom properties, vendor prefixes and
   `var()` are left alone.

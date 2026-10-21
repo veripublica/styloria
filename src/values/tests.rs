@@ -142,3 +142,96 @@ fn every_property_grammar_is_read() {
         .collect();
     assert!(unread.is_empty(), "{unread:?}");
 }
+
+fn descriptor(at_rule: &str, decl: &str) -> ValueCheck {
+    let css: &'static str = Box::leak(decl.to_string().into_boxed_str());
+    let items = crate::parse_block_contents(css).0;
+    match items.first() {
+        Some(crate::BlockItem::Declaration(d)) => {
+            check_descriptor(at_rule, &d.node.name, &d.node.value)
+        }
+        other => panic!("{decl}: {other:?}"),
+    }
+}
+
+#[test]
+fn descriptor_values() {
+    use ValueCheck::*;
+    for (at, decl, want) in [
+        ("font-face", "font-family: \"Foo Bar\"", Valid),
+        ("font-face", "font-family: Foo Bar", Valid),
+        ("font-face", "font-weight: 100 900", Valid),
+        ("font-face", "font-weight: bolder", Invalid),
+        ("font-face", "font-style: oblique 10deg 20deg", Valid),
+        ("font-face", "font-display: swap", Valid),
+        ("font-face", "font-display: fast", Invalid),
+        (
+            "font-face",
+            "unicode-range: U+0000-00FF, U+0131, u+4??",
+            Valid,
+        ),
+        ("font-face", "unicode-range: latin", Invalid),
+        ("FONT-FACE", "FONT-STYLE: italic", Valid),
+        ("counter-style", "system: fixed 3", Valid),
+        ("counter-style", "symbols: \"*\" \"†\"", Valid),
+        ("counter-style", "range: 1 10, 20 infinite", Valid),
+        ("counter-style", "pad: 3 \"0\"", Valid),
+        ("counter-style", "pad: -3 \"0\"", Invalid),
+        ("page", "size: A4 landscape", Valid),
+        ("page", "size: 10cm", Valid),
+        ("page", "size: huge", Invalid),
+        ("page", "margin: 1in 2in", Valid),
+        ("page", "margin: banana", Invalid),
+        ("property", "inherits: false", Valid),
+        ("property", "inherits: maybe", Invalid),
+        ("font-face", "font-weight: inherit", Valid),
+    ] {
+        assert_eq!(descriptor(at, decl), want, "@{at} {decl}");
+    }
+    use UnknownValue::*;
+    for (at, decl, why) in [
+        ("font-face", "colour: red", UnknownProperty),
+        ("font-face", "-webkit-src: x", PrefixedProperty),
+        ("media", "width: 1px", UnknownProperty),
+        ("font-face", "font-weight: var(--w)", Substitution),
+    ] {
+        assert_eq!(descriptor(at, decl), Unknown(why), "@{at} {decl}");
+    }
+}
+
+#[test]
+fn font_face_src_is_read_entry_by_entry() {
+    use ValueCheck::*;
+    for (decl, want) in [
+        ("src: url(a.woff2) format(\"woff2\")", Valid),
+        (
+            "src: url(a.woff2) format(woff2), url(a.ttf) format(\"truetype\")",
+            Valid,
+        ),
+        (
+            "src: url(\"a.otf\") format(\"opentype\") tech(variations, color-COLRv1)",
+            Valid,
+        ),
+        ("src: local(\"Foo Bar\"), local(Foo Bar), url(a.ttf)", Valid),
+        (
+            "src: url(a.eot?#iefix) format(\"embedded-opentype\"), url(a.woff) format(\"woff\", \"x\")",
+            Valid,
+        ),
+        // One good entry is enough: a browser skips the rest.
+        ("src: url(a.ttf) format(), url(b.ttf)", Valid),
+        ("src: url(a.ttf) format(nope), local(12)", Invalid),
+        ("src: 12px", Invalid),
+        ("src: \"a.ttf\"", Invalid),
+    ] {
+        assert_eq!(descriptor("font-face", decl), want, "{decl}");
+    }
+    // Entry by entry stays linear: 20,000 entries, each read once.
+    // Distinct entries, so the verdict cache cannot help.
+    let entries: Vec<_> = (0..20_000)
+        .map(|i| format!("url(a{i}) format(x y)"))
+        .collect();
+    let long = format!("src: {}", entries.join(", "));
+    let start = std::time::Instant::now();
+    assert_eq!(descriptor("font-face", &long), Invalid);
+    assert!(start.elapsed().as_secs() < 2, "{:?}", start.elapsed());
+}

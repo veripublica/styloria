@@ -17,7 +17,7 @@
 //!   which decides ([`Cascade`]).
 //! - [`validate`] and [`values`]: unknown properties and descriptors, and
 //!   values that cannot fit their grammar ([`validate_parsed_stylesheet`],
-//!   [`check_value`]).
+//!   [`check_value`], [`check_descriptor`]).
 //! - [`references`]: the URLs and selector names a stylesheet points at.
 //! - [`at_rule`]: the preludes of `@namespace`, `@import`, `@layer`, `@media`.
 //! - [`serialize`]: the tree back to CSS.
@@ -81,5 +81,6 @@ pub use validate::{
     validate_parsed_stylesheet, validate_stylesheet,
 };
 pub use values::{
-    MAX_VALUE_STEPS, MDN_DATA_VERSION, UnknownValue, ValueCheck, check_declaration, check_value,
+    MAX_VALUE_STEPS, MDN_DATA_VERSION, UnknownValue, ValueCheck, check_declaration,
+    check_descriptor, check_value,
 };

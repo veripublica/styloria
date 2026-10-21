@@ -1,4 +1,5 @@
-//! Whether a declaration's value fits its property's grammar.
+//! Whether a declaration's value fits its property's grammar, or its
+//! descriptor's ([`check_descriptor`]).
 //!
 //! [`check_value`] answers [`Valid`](ValueCheck::Valid),
 //! [`Invalid`](ValueCheck::Invalid) or [`Unknown`](ValueCheck::Unknown), and
@@ -102,7 +103,8 @@ pub enum ValueCheck {
 /// Why a value is neither certainly valid nor certainly invalid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UnknownValue {
-    /// The property is not one this crate knows.
+    /// The property is not one this crate knows, or the descriptor not one
+    /// its at-rule defines.
     UnknownProperty,
     /// The property is vendor-prefixed.
     PrefixedProperty,
@@ -149,6 +151,58 @@ pub fn check_value(property: &str, value: &[Spanned<ComponentValue<'_>>]) -> Val
     }
     let items = significant(value);
     cached(&property, &items)
+}
+
+/// Check a declaration inside an at-rule (`@font-face`, `@counter-style`,
+/// `@page`, …) against that at-rule's grammar for the descriptor `name`.
+/// `at_rule` is the at-rule's name without the `@`; names are ASCII
+/// case-insensitive, and a vendor prefix on the at-rule is ignored.
+///
+/// A descriptor the at-rule does not define is
+/// [`UnknownProperty`](UnknownValue::UnknownProperty), except in `@page`,
+/// which also takes properties: those are checked as properties.
+///
+/// `@font-face`'s `src` is a list whose entries a browser reads one by one,
+/// skipping those it cannot parse (CSS Fonts 4 §4.3), so it is Invalid
+/// only when no entry fits.
+pub fn check_descriptor(
+    at_rule: &str,
+    name: &str,
+    value: &[Spanned<ComponentValue<'_>>],
+) -> ValueCheck {
+    if name.starts_with('-') {
+        return ValueCheck::Unknown(UnknownValue::PrefixedProperty);
+    }
+    let at_rule = unprefixed(at_rule);
+    let mut key = String::with_capacity(at_rule.len() + name.len() + 2);
+    key.push('@');
+    key.push_str(at_rule);
+    key.push('/');
+    key.push_str(name);
+    key.make_ascii_lowercase();
+    if !grammars().properties.contains_key(key.as_str()) {
+        return if at_rule.eq_ignore_ascii_case("page") {
+            check_value(name, value)
+        } else {
+            ValueCheck::Unknown(UnknownValue::UnknownProperty)
+        };
+    }
+    let items = significant(value);
+    if key != "@font-face/src" {
+        return cached(&key, &items);
+    }
+    let mut unknown = None;
+    for entry in items.split(|v| matches!(v, ComponentValue::Token(Token::Comma))) {
+        match cached(&key, entry) {
+            ValueCheck::Valid => return ValueCheck::Valid,
+            ValueCheck::Unknown(why) => unknown = unknown.or(Some(why)),
+            ValueCheck::Invalid => {}
+        }
+    }
+    match unknown {
+        Some(why) => ValueCheck::Unknown(why),
+        None => ValueCheck::Invalid,
+    }
 }
 
 /// The most verdicts [`cached`] keeps per thread; past it, it starts over.
@@ -948,6 +1002,7 @@ fn is_base_type(name: &str) -> bool {
             | "dimension-token"
             | "percentage-token"
             | "url-token"
+            | "unicode-range-token"
     )
 }
 
@@ -1031,6 +1086,7 @@ fn base_type(name: &str, range: Option<Range>, v: &ComponentValue<'_>) -> Option
         "hex-color" => matches!(token, Some(Token::Hash { value, .. })
             if matches!(value.len(), 3 | 4 | 6 | 8) && value.bytes().all(|b| b.is_ascii_hexdigit())),
         "hash-token" => matches!(token, Some(Token::Hash { .. })),
+        "unicode-range-token" => matches!(token, Some(Token::UnicodeRange { .. })),
         "number-token" => matches!(token, Some(Token::Number { .. })),
         "percentage-token" => matches!(token, Some(Token::Percentage { .. })),
         "function-token" => matches!(v, ComponentValue::Function { .. }),

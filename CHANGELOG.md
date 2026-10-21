@@ -9,6 +9,30 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Descriptor values are checked** against their at-rule's grammar:
+  `@font-face`, `@counter-style`, `@page`, `@font-palette-values`,
+  `@property` and `@view-transition`, from mdn-data's `at-rules.json`.
+  `check_descriptor(at_rule, name, value)` answers as `check_value` does,
+  and `validate` reports an invalid descriptor value as
+  `DiagnosticKind::InvalidValue`, with the descriptor as its name.
+  Properties inside `@page` are checked as properties.
+- `@font-face`'s `src` follows CSS Fonts 4, not mdn's older grammar:
+  `format()` takes keywords (`format(woff2)`), `tech()` is read, and since a
+  browser skips an entry it cannot parse, `src` is Invalid only when no
+  entry fits.
+- `<unicode-range-token>` is read, so `unicode-range` is checked.
+
+### Changed
+
+- `validate` now reports values inside descriptor at-rules, where 0.14 was
+  silent: a consumer sees `InvalidValue` diagnostics it did not see before.
+  On the 878 shelf sheets that is 18 distinct values (470 declarations), and
+  Firefox 158 drops every one of them, most often a fallback list in
+  `@font-face`'s `font-family` (`"Arial", sans-serif`), which leaves the
+  whole rule without a family. Property verdicts are unchanged.
+
 ## [0.14.0] - 2026-10-21
 
 The cascade becomes a query: for each element and property, `Cascade` answers

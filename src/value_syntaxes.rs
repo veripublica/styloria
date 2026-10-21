@@ -1,7 +1,9 @@
 // CSS value grammars from mdn-data 2.37.2 (https://github.com/mdn/data):
-// each property's `syntax` from css/properties.json and each named type's
-// from css/syntaxes.json, in CSS Values 4's value definition syntax, as
-// written. Sorted by name, for binary search. Regenerated, not
+// each property's `syntax` from css/properties.json, each descriptor's from
+// css/at-rules.json (keyed `@at-rule/descriptor`) and each named type's from
+// css/syntaxes.json, in CSS Values 4's value definition syntax, as written,
+// with the overrides and supplements the generator names. Sorted by name,
+// for binary search. Regenerated, not
 // hand-maintained: veripublica/styloria/gen/values.py.
 pub(crate) const MDN_DATA_VERSION: &str = "2.37.2";
 
@@ -202,6 +204,78 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
         "read-only | read-write | read-write-plaintext-only",
     ),
     ("-webkit-user-select", "auto | text | none | all"),
+    (
+        "@counter-style/additive-symbols",
+        "[ <integer [0,∞]> && <symbol> ]#",
+    ),
+    ("@counter-style/fallback", "<counter-style-name>"),
+    ("@counter-style/negative", "<symbol> <symbol>?"),
+    ("@counter-style/pad", "<integer [0,∞]> && <symbol>"),
+    ("@counter-style/prefix", "<symbol>"),
+    (
+        "@counter-style/range",
+        "[ [ <integer> | infinite ]{2} ]# | auto",
+    ),
+    (
+        "@counter-style/speak-as",
+        "auto | bullets | numbers | words | spell-out | <counter-style-name>",
+    ),
+    ("@counter-style/suffix", "<symbol>"),
+    ("@counter-style/symbols", "<symbol>+"),
+    (
+        "@counter-style/system",
+        "cyclic | numeric | alphabetic | symbolic | additive | [ fixed <integer>? ] | [ extends <counter-style-name> ]",
+    ),
+    ("@font-face/ascent-override", "normal | <percentage>"),
+    ("@font-face/descent-override", "normal | <percentage>"),
+    (
+        "@font-face/font-display",
+        "auto | block | swap | fallback | optional",
+    ),
+    ("@font-face/font-family", "<family-name>"),
+    (
+        "@font-face/font-feature-settings",
+        "normal | <feature-tag-value>#",
+    ),
+    ("@font-face/font-stretch", "<font-stretch-absolute>{1,2}"),
+    (
+        "@font-face/font-style",
+        "normal | italic | oblique <angle>{0,2}",
+    ),
+    (
+        "@font-face/font-variation-settings",
+        "normal | [ <string> <number> ]#",
+    ),
+    ("@font-face/font-weight", "<font-weight-absolute>{1,2}"),
+    ("@font-face/line-gap-override", "normal | <percentage>"),
+    ("@font-face/size-adjust", "<percentage>"),
+    ("@font-face/src", "<font-src>"),
+    ("@font-face/unicode-range", "<unicode-range-token>#"),
+    (
+        "@font-palette-values/base-palette",
+        "light | dark | <integer [0,∞]>",
+    ),
+    ("@font-palette-values/font-family", "<family-name>#"),
+    (
+        "@font-palette-values/override-colors",
+        "[ <integer [0,∞]> <color> ]#",
+    ),
+    ("@page/bleed", "auto | <length>"),
+    ("@page/marks", "none | [ crop || cross ]"),
+    ("@page/page-margin-safety", "none | clamp | add"),
+    (
+        "@page/page-orientation",
+        "upright | rotate-left | rotate-right",
+    ),
+    (
+        "@page/size",
+        "<length [0,∞]>{1,2} | auto | [ <page-size> || [ portrait | landscape ] ]",
+    ),
+    ("@property/inherits", "true | false"),
+    ("@property/initial-value", "<declaration-value>?"),
+    ("@property/syntax", "<string>"),
+    ("@view-transition/navigation", "auto | none"),
+    ("@view-transition/types", "none | <custom-ident>+"),
     ("accent-color", "auto | <color>"),
     (
         "align-content",
@@ -1362,6 +1436,10 @@ pub(crate) const TYPE_SYNTAXES: &[(&str, &str)] = &[
         "<hex-color> | <color-function> | <named-color> | <color-mix()> | transparent",
     ),
     (
+        "color-font-tech",
+        "color-COLRv0 | color-COLRv1 | color-SVG | color-sbix | color-CBDT",
+    ),
+    (
         "color-function",
         "<rgb()> | <rgba()> | <hsl()> | <hsla()> | <hwb()> | <lab()> | <lch()> | <oklab()> | <oklch()> | <color()>",
     ),
@@ -1573,8 +1651,24 @@ pub(crate) const TYPE_SYNTAXES: &[(&str, &str)] = &[
         "<fixed-breadth> | minmax( <fixed-breadth> , <track-breadth> ) | minmax( <inflexible-breadth> , <fixed-breadth> )",
     ),
     (
+        "font-features-tech",
+        "features-opentype | features-aat | features-graphite",
+    ),
+    (
+        "font-format",
+        "<string> | collection | embedded-opentype | opentype | svg | truetype | woff | woff2",
+    ),
+    (
+        "font-src",
+        "<url> [ format( <font-format> | <string># ) ]? [ tech( <font-tech># ) ]? | local( <family-name> )",
+    ),
+    (
         "font-stretch-absolute",
         "normal | ultra-condensed | extra-condensed | condensed | semi-condensed | semi-expanded | expanded | extra-expanded | ultra-expanded | <percentage>",
+    ),
+    (
+        "font-tech",
+        "<font-features-tech> | <color-font-tech> | variations | palettes | incremental-patch | incremental-range | incremental-auto",
     ),
     ("font-variant-css2", "normal | small-caps"),
     ("font-weight-absolute", "normal | bold | <number [1,1000]>"),
