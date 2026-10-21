@@ -24,9 +24,34 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   but `direction`, `unicode-bidi` and custom properties. What cannot be
   settled is Unknown and says why (`UnknownReason`): an Unknown selector, a
   rule inside `@media`/`@supports`/`@container`/`@scope`/`@document`/
-  `@starting-style`, a conditional sheet, a nested style rule, a logical
+  `@starting-style`, a conditional sheet, a nested style rule too large to
+  resolve, a logical
   property standing for a physical one (or the reverse), a vendor prefix,
   `revert`. Values are not checked.
+- **CSS Nesting in the cascade.** A nested style rule is resolved through
+  its parent (`SelectorList::resolve_nesting`): `&` becomes `:is(parent)`
+  and counts the parent list's highest specificity, a selector with no `&`
+  or a leading combinator gets `&` put in front, and `&` outside any style
+  rule is the root. Declarations after a nested rule come after it in the
+  order of appearance. Only a rule whose resolved selector would pass
+  `MAX_RESOLVED_SIMPLES` stays Unknown (`UnknownReason::Nested`); inside
+  `@scope`, `&` at the top stays Unknown.
+- **`Cascade::with_imports`** follows `@import`: the caller returns the
+  imported sheet, and its rules count where the `@import` stands, in its
+  `layer()`, conditional under a media list or `supports()`. Only imports
+  in their proper place count; cycles are followed once, nesting is bounded
+  by `MAX_IMPORT_DEPTH`.
+- **`MediaQueryList::always_holds`**: an empty list, `all` or `only all`.
+  `@media all` and `@media {…}` are no longer conditions in the cascade.
+
+### Changed
+
+- **Matching has a step budget** (`MAX_MATCH_STEPS`, 4096 compounds tried
+  per call, arguments included); past it the answer is `Unknown`. Nested
+  `:is()` with descendant combinators, which a resolved `&` produces,
+  otherwise multiplies the work by the tree's depth per level: 255 nested
+  rules took 15 s on one element, unbounded with `& &`. On the 562-book
+  shelf (2.2 million elements) no answer changes.
 - **`longhands(name)`**: the longhands a shorthand sets, nested shorthands
   expanded, from a table generated from MDN's data (mdn-data 2.37.2) and
   completed with the reset-only sub-properties the specs name (`border`

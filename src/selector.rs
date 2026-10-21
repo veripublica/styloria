@@ -374,6 +374,203 @@ impl SimpleSelector<'_> {
     }
 }
 
+/// The most simple selectors [`SelectorList::resolve_nesting`] builds. Every
+/// `&` becomes a copy of the parent's list, so `& &` in each of a few dozen
+/// nested rules would double the size per level; real nesting stays far
+/// below this.
+pub const MAX_RESOLVED_SIMPLES: usize = 4096;
+
+impl<'a> SelectorList<'a> {
+    /// This list with CSS Nesting resolved (CSS Nesting §2–3): the selectors
+    /// a nested style rule stands for on its own.
+    ///
+    /// `parent` is the enclosing style rule's list, itself already resolved.
+    /// Each `&` becomes `:is(parent)`, so it matches what the parent matches
+    /// and counts the parent's highest specificity. A selector that starts
+    /// with a combinator, or has no `&` anywhere, gets `&` put in front: `> a`
+    /// is `& > a`, `a` is `& a`.
+    ///
+    /// With no parent, the rule is not nested, and `&` stands for `:scope`,
+    /// which in a document's stylesheet is the root element: it becomes
+    /// [`PseudoClass::Root`]. Inside `@scope` that is wrong, so a caller
+    /// there leaves the list unresolved.
+    ///
+    /// `None` when the result would hold more than [`MAX_RESOLVED_SIMPLES`]
+    /// simple selectors or nest arguments deeper than
+    /// [`MAX_SELECTOR_DEPTH`]. Spans of the inserted pieces are those of the
+    /// `&` they replace; an implicit `&` has an empty span where its selector
+    /// starts.
+    pub fn resolve_nesting(&self, parent: Option<&SelectorList<'a>>) -> Option<SelectorList<'a>> {
+        let own = size(self);
+        let (with, implicit) = match parent {
+            Some(p) => {
+                let p_size = size(p);
+                let implicit = self
+                    .selectors
+                    .iter()
+                    .filter(|s| needs_implicit_nesting(&s.node))
+                    .count();
+                let copies = own.nestings + implicit;
+                let simples = copies
+                    .checked_mul(p_size.simples.max(1))?
+                    .checked_add(own.simples)?;
+                let depth = if copies > 0 {
+                    own.depth + 1 + p_size.depth
+                } else {
+                    own.depth
+                };
+                if simples > MAX_RESOLVED_SIMPLES || depth > MAX_SELECTOR_DEPTH {
+                    return None;
+                }
+                let is = PseudoClass::Is {
+                    selectors: p.clone(),
+                    dropped: 0,
+                };
+                (SimpleSelector::PseudoClass(is), true)
+            }
+            None => (SimpleSelector::PseudoClass(PseudoClass::Root), false),
+        };
+        let selectors = self
+            .selectors
+            .iter()
+            .map(|s| {
+                let mut c = substitute_complex(&s.node, &with);
+                if implicit && needs_implicit_nesting(&s.node) {
+                    let at = Span::new(s.span.start, s.span.start);
+                    let amp = CompoundSelector {
+                        simples: vec![Spanned::new(with.clone(), at)],
+                    };
+                    c.compounds.insert(0, Spanned::new(amp, at));
+                    c.combinators
+                        .insert(0, c.leading.take().unwrap_or(Combinator::Descendant));
+                }
+                Spanned::new(c, s.span)
+            })
+            .collect();
+        Some(SelectorList { selectors })
+    }
+}
+
+/// Whether a nested rule's selector gets an `&` put in front: when it starts
+/// with a combinator, or has none of its own.
+fn needs_implicit_nesting(c: &ComplexSelector<'_>) -> bool {
+    c.leading.is_some() || size_complex(c).nestings == 0
+}
+
+/// What [`SelectorList::resolve_nesting`] budgets: simple selectors, `&`s
+/// among them, and how deep selector arguments nest.
+#[derive(Default, Clone, Copy)]
+struct Size {
+    simples: usize,
+    nestings: usize,
+    depth: usize,
+}
+
+fn size(list: &SelectorList<'_>) -> Size {
+    list.selectors
+        .iter()
+        .map(|s| size_complex(&s.node))
+        .fold(Size::default(), |a, b| Size {
+            simples: a.simples + b.simples,
+            nestings: a.nestings + b.nestings,
+            depth: a.depth.max(b.depth),
+        })
+}
+
+fn size_complex(c: &ComplexSelector<'_>) -> Size {
+    let mut total = Size::default();
+    for s in c.compounds.iter().flat_map(|c| &c.node.simples) {
+        total.simples += 1;
+        match &s.node {
+            SimpleSelector::Nesting => total.nestings += 1,
+            SimpleSelector::PseudoClass(p) => {
+                if let Some(list) = argument_selectors(p) {
+                    let inner = size(list);
+                    total.simples += inner.simples;
+                    total.nestings += inner.nestings;
+                    total.depth = total.depth.max(inner.depth + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    total
+}
+
+/// The selector list a pseudo-class takes as its argument, if any.
+fn argument_selectors<'p, 'a>(p: &'p PseudoClass<'a>) -> Option<&'p SelectorList<'a>> {
+    match p {
+        PseudoClass::Not(s)
+        | PseudoClass::Has(s)
+        | PseudoClass::Is { selectors: s, .. }
+        | PseudoClass::Where { selectors: s, .. }
+        | PseudoClass::NthChild { of: Some(s), .. }
+        | PseudoClass::NthLastChild { of: Some(s), .. } => Some(s),
+        _ => None,
+    }
+}
+
+/// `c` with every `&`, at any depth, replaced by `with`.
+fn substitute_complex<'a>(
+    c: &ComplexSelector<'a>,
+    with: &SimpleSelector<'a>,
+) -> ComplexSelector<'a> {
+    let compounds = c
+        .compounds
+        .iter()
+        .map(|compound| {
+            let simples = compound
+                .node
+                .simples
+                .iter()
+                .map(|s| Spanned::new(substitute_simple(&s.node, with), s.span))
+                .collect();
+            Spanned::new(CompoundSelector { simples }, compound.span)
+        })
+        .collect();
+    ComplexSelector {
+        leading: c.leading,
+        compounds,
+        combinators: c.combinators.clone(),
+    }
+}
+
+fn substitute_simple<'a>(s: &SimpleSelector<'a>, with: &SimpleSelector<'a>) -> SimpleSelector<'a> {
+    let list = |l: &SelectorList<'a>| SelectorList {
+        selectors: l
+            .selectors
+            .iter()
+            .map(|c| Spanned::new(substitute_complex(&c.node, with), c.span))
+            .collect(),
+    };
+    let p = match s {
+        SimpleSelector::Nesting => return with.clone(),
+        SimpleSelector::PseudoClass(p) if argument_selectors(p).is_some() => p,
+        _ => return s.clone(),
+    };
+    SimpleSelector::PseudoClass(match p {
+        PseudoClass::Not(l) => PseudoClass::Not(list(l)),
+        PseudoClass::Has(l) => PseudoClass::Has(list(l)),
+        PseudoClass::Is { selectors, dropped } => PseudoClass::Is {
+            selectors: list(selectors),
+            dropped: *dropped,
+        },
+        PseudoClass::Where { selectors, dropped } => PseudoClass::Where {
+            selectors: list(selectors),
+            dropped: *dropped,
+        },
+        PseudoClass::NthChild { nth, of } => PseudoClass::NthChild {
+            nth: *nth,
+            of: of.as_ref().map(list),
+        },
+        PseudoClass::NthLastChild { nth, of } => PseudoClass::NthLastChild {
+            nth: *nth,
+            of: of.as_ref().map(list),
+        },
+        other => other.clone(),
+    })
+}
+
 /// Parse a style rule's prelude as a selector list. On failure, the errors
 /// say where: **at most one per comma-separated selector**, plus one for each
 /// empty side of a comma.

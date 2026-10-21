@@ -19,9 +19,16 @@
 //!
 //! - a selector that matches Unknown ([`crate::matching`]);
 //! - a rule inside `@media`, `@supports`, `@container`, `@scope`,
-//!   `@document` or `@starting-style`, whose condition is not evaluated, and
-//!   every rule of a sheet the caller marks conditional (a `<link media>`);
-//! - a style rule nested in another, whose `&` this does not resolve yet;
+//!   `@document` or `@starting-style`, whose condition is not evaluated
+//!   (`@media all` and an empty media list hold everywhere, so they are not
+//!   conditions), every rule of a sheet the caller marks conditional (a
+//!   `<link media>`), and every rule of an `@import` with a media list or a
+//!   `supports()`;
+//! - a style rule nested so deeply, or with so many `&`, that its resolved
+//!   selector would pass [`MAX_RESOLVED_SIMPLES`](crate::selector::MAX_RESOLVED_SIMPLES);
+//!   every other nested rule is resolved as CSS Nesting says
+//!   ([`SelectorList::resolve_nesting`]), and declarations after a nested
+//!   rule keep their place in the order;
 //! - a logical property, which may stand for either physical one;
 //! - a vendor-prefixed property, which only some engines honour;
 //! - `revert` and `revert-layer`, which hand the property back to an earlier
@@ -68,14 +75,20 @@
 //! assert_eq!(decl.node.name_span.start_line_col(css), (2, 22));
 //! ```
 //!
+//! `@import` is followed when the caller hands over the imported sheets
+//! ([`Cascade::with_imports`]): their rules take the `@import`'s place, in
+//! its layer, under its conditions.
+//!
 //! **Out of scope:** values are not checked, so `width: banana` counts as
 //! setting `width` although a browser drops it; user-agent and user styles,
-//! inheritance, and `@import` (the caller passes imported sheets as sheets
-//! of their own, in order) are not modelled.
+//! and inheritance, are not modelled.
 
-use crate::at_rule::{LayerName, LayerRule, parse_layer_rule};
+use crate::at_rule::{
+    ImportLayer, ImportRule, LayerName, LayerRule, parse_import_rule, parse_layer_rule,
+    parse_media_query_list,
+};
 use crate::matching::{Element, Match, Namespaces};
-use crate::parser::{self, BlockItem, ComponentValue, Declaration, Rule, Stylesheet};
+use crate::parser::{self, AtRule, BlockItem, ComponentValue, Declaration, Rule, Stylesheet};
 use crate::properties::{logical_counterparts, longhands};
 use crate::selector::{
     SelectorList, Specificity, parse_relative_selector_list, parse_selector_list,
@@ -105,8 +118,10 @@ pub enum UnknownReason {
     Conditional,
     /// The sheet was given as [`Sheet::conditional`].
     ConditionalSheet,
-    /// The rule is nested in another style rule, and its selector, which
-    /// depends on the parent's through `&`, is not resolved yet.
+    /// The rule is nested in another style rule, and its selector, resolved
+    /// through `&`, would pass
+    /// [`MAX_RESOLVED_SIMPLES`](crate::selector::MAX_RESOLVED_SIMPLES), so it
+    /// is left unresolved.
     Nested,
     /// The declaration is a logical property and the question a physical
     /// one, or the other way round.
@@ -251,31 +266,43 @@ impl<'c, 'e> PropertyAnswer<'c, 'e> {
 
 impl<'s, 'a> Cascade<'s, 'a> {
     /// The cascade of these sheets, in document order (later wins at equal
-    /// specificity).
+    /// specificity). `@import` rules are not followed; see
+    /// [`with_imports`](Self::with_imports).
     pub fn new(sheets: &[Sheet<'s, 'a>]) -> Cascade<'s, 'a> {
+        Self::with_imports(sheets, |_, _| None)
+    }
+
+    /// [`new`](Self::new), following `@import`. For each `@import` in its
+    /// proper place (before every rule but `@charset` and `@layer`
+    /// statements), `import` is given the importing sheet and the rule, and
+    /// returns the imported sheet if the caller has it. Its rules then count
+    /// where the `@import` stands: in `layer()`'s layer, conditional under a
+    /// media list or `supports()`.
+    ///
+    /// An import the caller does not return adds nothing. A sheet that
+    /// imports itself, directly or not, is followed once, and imports nest at
+    /// most [`MAX_IMPORT_DEPTH`] deep.
+    pub fn with_imports<F>(sheets: &[Sheet<'s, 'a>], mut import: F) -> Cascade<'s, 'a>
+    where
+        F: FnMut(&'s Stylesheet<'a>, &ImportRule<'a>) -> Option<&'s Stylesheet<'a>>,
+    {
         let mut b = Builder {
             rules: Vec::new(),
             layers: Layers::new(),
             order: 0,
+            namespaces: Vec::with_capacity(sheets.len()),
+            import: &mut import,
+            importing: Vec::new(),
         };
-        let mut namespaces = Vec::with_capacity(sheets.len());
-        for (i, sheet) in sheets.iter().enumerate() {
-            namespaces.push(Namespaces::from_stylesheet(sheet.stylesheet));
-            let ctx = Ctx {
-                sheet: i,
-                layer: Layers::ROOT,
-                reasons: UnknownReasons::default()
-                    .with_if(UnknownReason::ConditionalSheet, sheet.conditional),
-                parent: None,
-            };
-            for rule in &sheet.stylesheet.rules {
-                b.rule(rule, &ctx);
-            }
+        for sheet in sheets {
+            let reasons = UnknownReasons::default()
+                .with_if(UnknownReason::ConditionalSheet, sheet.conditional);
+            b.sheet(sheet.stylesheet, Layers::ROOT, reasons);
         }
         let layer_rank = b.layers.ranks();
         Cascade {
             rules: b.rules,
-            namespaces,
+            namespaces: b.namespaces,
             unlayered: layer_rank.len() - 1,
             layer_rank,
         }
@@ -477,10 +504,22 @@ fn is_revert(d: &Declaration<'_>) -> bool {
     }
 }
 
-struct Builder<'s, 'a> {
+/// How deep `@import`s are followed: a sheet imported by a sheet imported
+/// by … one of the sheets given.
+pub const MAX_IMPORT_DEPTH: usize = 32;
+
+type ImportFn<'f, 's, 'a> =
+    dyn FnMut(&'s Stylesheet<'a>, &ImportRule<'a>) -> Option<&'s Stylesheet<'a>> + 'f;
+
+struct Builder<'f, 's, 'a> {
     rules: Vec<CascadeRule<'s, 'a>>,
     layers: Layers,
     order: u32,
+    /// One entry per sheet walked, imported ones included.
+    namespaces: Vec<Namespaces<'a>>,
+    import: &'f mut ImportFn<'f, 's, 'a>,
+    /// The sheets being walked, outermost first: the import chain.
+    importing: Vec<&'s Stylesheet<'a>>,
 }
 
 /// Where in the sheets a rule sits.
@@ -488,16 +527,73 @@ struct Ctx<'p, 's, 'a> {
     sheet: usize,
     layer: usize,
     reasons: UnknownReasons,
-    /// The style rule this one is nested in, and its selectors.
+    /// The style rule this one is nested in, and its resolved selectors.
     parent: Option<(&'s Spanned<Rule<'a>>, &'p SelectorList<'a>)>,
+    /// Inside `@scope`, where `&` at the top stands for the scoping root.
+    scoped: bool,
 }
 
-impl<'s, 'a> Builder<'s, 'a> {
+impl<'s, 'a> Builder<'_, 's, 'a> {
+    /// A whole sheet, its imports in their place.
+    fn sheet(&mut self, sheet: &'s Stylesheet<'a>, layer: usize, reasons: UnknownReasons) {
+        if self.importing.len() > MAX_IMPORT_DEPTH
+            || self.importing.iter().any(|s| std::ptr::eq(*s, sheet))
+        {
+            return;
+        }
+        let ctx = Ctx {
+            sheet: self.namespaces.len(),
+            layer,
+            reasons,
+            parent: None,
+            scoped: false,
+        };
+        self.namespaces.push(Namespaces::from_stylesheet(sheet));
+        self.importing.push(sheet);
+        // `@import` counts only before every other rule but `@charset` and
+        // `@layer` statements; a browser ignores a later one.
+        let mut imports_allowed = true;
+        for rule in &sheet.rules {
+            if let Rule::At(at) = &rule.node {
+                let is = |n: &str| at.name.eq_ignore_ascii_case(n);
+                if is("import") {
+                    if imports_allowed {
+                        self.import(sheet, at, &ctx);
+                    }
+                    continue;
+                }
+                if !(is("charset") || (is("layer") && at.block.is_none())) {
+                    imports_allowed = false;
+                }
+            } else {
+                imports_allowed = false;
+            }
+            self.rule(rule, &ctx);
+        }
+        self.importing.pop();
+    }
+
+    fn import(&mut self, from: &'s Stylesheet<'a>, at: &AtRule<'a>, ctx: &Ctx<'_, 's, 'a>) {
+        let Some(rule) = parse_import_rule(&at.prelude) else {
+            return;
+        };
+        let Some(sheet) = (self.import)(from, &rule) else {
+            return;
+        };
+        let layer = match &rule.layer {
+            ImportLayer::None => ctx.layer,
+            ImportLayer::Anonymous => self.layers.anonymous(ctx.layer),
+            ImportLayer::Named(n) => self.layers.declare(ctx.layer, n),
+        };
+        let conditional = rule.supports.is_some() || !rule.media.always_holds();
+        let reasons = ctx.reasons.with_if(UnknownReason::Conditional, conditional);
+        self.sheet(sheet, layer, reasons);
+    }
+
     fn rule(&mut self, rule: &'s Spanned<Rule<'a>>, ctx: &Ctx<'_, 's, 'a>) {
         match &rule.node {
             Rule::Qualified(q) => {
-                let nested = ctx.parent.is_some();
-                let parsed = if nested {
+                let parsed = if ctx.parent.is_some() {
                     parse_relative_selector_list(&q.prelude)
                 } else {
                     parse_selector_list(&q.prelude)
@@ -505,7 +601,16 @@ impl<'s, 'a> Builder<'s, 'a> {
                 // A rule whose selector does not parse is dropped, nested
                 // rules and all, as a browser does.
                 let Ok(selectors) = parsed else { return };
-                let reasons = ctx.reasons.with_if(UnknownReason::Nested, nested);
+                let resolved = match ctx.parent {
+                    Some((_, parent)) => selectors.resolve_nesting(Some(parent)),
+                    // At the top of `@scope`, `&` is the scoping root, which
+                    // this does not know: it stays `&` and matches Unknown.
+                    None if ctx.scoped => Some(selectors.clone()),
+                    None => selectors.resolve_nesting(None),
+                };
+                let unresolved = resolved.is_none();
+                let selectors = resolved.unwrap_or(selectors);
+                let reasons = ctx.reasons.with_if(UnknownReason::Nested, unresolved);
                 self.style_rule(rule, selectors, &q.block.node, ctx, reasons);
             }
             Rule::At(at) => {
@@ -535,12 +640,19 @@ impl<'s, 'a> Builder<'s, 'a> {
                     // at-rule: nothing in it styles an element.
                     return;
                 };
-                let conditional = !bare.eq_ignore_ascii_case("layer");
+                let conditional = if bare.eq_ignore_ascii_case("layer") {
+                    false
+                } else if bare.eq_ignore_ascii_case("media") {
+                    !parse_media_query_list(&at.prelude).always_holds()
+                } else {
+                    true
+                };
                 let inner = Ctx {
                     sheet: ctx.sheet,
                     layer,
                     reasons: ctx.reasons.with_if(UnknownReason::Conditional, conditional),
                     parent: ctx.parent,
+                    scoped: ctx.scoped || bare.eq_ignore_ascii_case("scope"),
                 };
                 match inner.parent {
                     // Inside a style rule, a group rule's own declarations
@@ -562,7 +674,10 @@ impl<'s, 'a> Builder<'s, 'a> {
         }
     }
 
-    /// A style rule's declarations, and the rules nested in its block.
+    /// A style rule's declarations, and the rules nested in its block, in
+    /// source order. Declarations after a nested rule come after that rule's
+    /// in the order of appearance (CSS Nesting's nested declarations rule),
+    /// with this rule's selectors.
     fn style_rule(
         &mut self,
         rule: &'s Spanned<Rule<'a>>,
@@ -571,41 +686,48 @@ impl<'s, 'a> Builder<'s, 'a> {
         ctx: &Ctx<'_, 's, 'a>,
         reasons: UnknownReasons,
     ) {
-        let mut declarations = Vec::new();
-        for item in items {
-            if let BlockItem::Declaration(d) = item {
-                declarations.push((d, self.order));
-                self.order += 1;
-            }
-        }
-        let has_rules = items.iter().any(|i| matches!(i, BlockItem::Rule(_)));
-        let index = self.rules.len();
-        self.rules.push(CascadeRule {
-            rule,
-            selectors,
-            declarations,
-            sheet: ctx.sheet,
-            layer: ctx.layer,
-            reasons,
-        });
-        if !has_rules {
-            return;
-        }
-        // Children see this rule as their parent. The selectors are moved
-        // out for the walk and put back, so they are not cloned per child.
-        let selectors = std::mem::take(&mut self.rules[index].selectors);
         let inner = Ctx {
             sheet: ctx.sheet,
             layer: ctx.layer,
             reasons,
             parent: Some((rule, &selectors)),
+            scoped: ctx.scoped,
         };
+        // Each run of declarations becomes a rule of its own; their
+        // selectors are filled in at the end, so children can borrow them
+        // meanwhile.
+        let mut runs = Vec::new();
+        let mut current = None;
         for item in items {
-            if let BlockItem::Rule(r) = item {
-                self.rule(r, &inner);
+            match item {
+                BlockItem::Declaration(d) => {
+                    let index = *current.get_or_insert_with(|| {
+                        self.rules.push(CascadeRule {
+                            rule,
+                            selectors: SelectorList::default(),
+                            declarations: Vec::new(),
+                            sheet: ctx.sheet,
+                            layer: ctx.layer,
+                            reasons,
+                        });
+                        runs.push(self.rules.len() - 1);
+                        self.rules.len() - 1
+                    });
+                    self.rules[index].declarations.push((d, self.order));
+                    self.order += 1;
+                }
+                BlockItem::Rule(r) => {
+                    current = None;
+                    self.rule(r, &inner);
+                }
             }
         }
-        self.rules[index].selectors = selectors;
+        if let Some((&last, rest)) = runs.split_last() {
+            for &i in rest {
+                self.rules[i].selectors = selectors.clone();
+            }
+            self.rules[last].selectors = selectors;
+        }
     }
 }
 
@@ -938,7 +1060,11 @@ mod tests {
                 vec![Logical, Prefixed],
             ),
             ("img { width: revert }", "width", vec![Revert]),
-            ("body { & img { width: 1px } }", "width", vec![Nested]),
+            (
+                "@scope (body) { & img { width: 1px } }",
+                "width",
+                vec![Selector, Conditional],
+            ),
             (
                 "body { @media print { width: 1px } }",
                 "width",
@@ -1019,5 +1145,142 @@ mod tests {
                 types: 1
             }
         );
+    }
+
+    #[test]
+    fn nested_rules_resolve_through_their_parent() {
+        // Implicit `& `, an explicit `&`, a leading combinator.
+        for (css, want) in [
+            ("body { img { width: 1px } }", Match::Yes),
+            ("body { & img { width: 1px } }", Match::Yes),
+            ("body { > img { width: 1px } }", Match::Yes),
+            ("html { > img { width: 1px } }", Match::No),
+            ("p { & img { width: 1px } }", Match::No),
+            (".pic { &.pic { width: 1px } }", Match::Yes),
+            (".pic { &:not(.pic) { width: 1px } }", Match::No),
+            ("html { body { & > .pic { width: 1px } } }", Match::Yes),
+            ("body { :not(&) > img { width: 1px } }", Match::No),
+            ("body { @media all { img { width: 1px } } }", Match::Yes),
+        ] {
+            assert_eq!(ask(&cascade(&[css]), IMG, None, "width").0, want, "{css}");
+        }
+        // `&` counts the parent list's highest specificity, as `:is()`.
+        let c = cascade(&[".pic { width: 1px } body, #z { & img { width: 2px } }"]);
+        assert_eq!(ask(&c, IMG, None, "width").1, "width: 2px");
+        let style = c.style_for(&IMG, None);
+        assert_eq!(
+            style
+                .property("width")
+                .decided_by()
+                .unwrap()
+                .candidate
+                .specificity,
+            Specificity {
+                ids: 1,
+                classes: 0,
+                types: 1
+            }
+        );
+        // `&` at the top is the root.
+        let c = cascade(&["& { width: 1px }"]);
+        assert_eq!(ask(&c, El(0), None, "width").0, Match::Yes);
+        assert_eq!(ask(&c, IMG, None, "width").0, Match::No);
+    }
+
+    #[test]
+    fn declarations_after_a_nested_rule_come_after_it() {
+        let c = cascade(&["img { width: 1px; & { width: 2px } width: 3px }"]);
+        assert_eq!(ask(&c, IMG, None, "width").1, "width: 3px");
+        let c = cascade(&["img { width: 1px; & { width: 2px } }"]);
+        assert_eq!(ask(&c, IMG, None, "width").1, "width: 2px");
+        // The later run keeps the rule's own selectors and span.
+        let css = "img { & { width: 2px } width: 3px }";
+        let c = cascade(&[css]);
+        let style = c.style_for(&IMG, None);
+        let a = style.property("width");
+        assert_eq!(a.status, Match::Yes);
+        assert_eq!(
+            a.decided_by().unwrap().candidate.rule.unwrap().span.start,
+            0
+        );
+    }
+
+    #[test]
+    fn nesting_too_large_to_resolve_stays_unknown() {
+        let depth = 14;
+        let mut css = String::from("*");
+        for _ in 0..depth {
+            css.push_str(" { :is(&, &)");
+        }
+        css.push_str(" { width: 1px }");
+        css.push_str(&" }".repeat(depth));
+        let c = cascade(&[&css]);
+        let style = c.style_for(&IMG, None);
+        let a = style.property("width");
+        assert_eq!(a.status, Match::Unknown);
+        assert!(
+            a.decided_by()
+                .unwrap()
+                .reasons
+                .contains(UnknownReason::Nested)
+        );
+    }
+
+    #[test]
+    fn media_all_is_no_condition() {
+        for (css, want) in [
+            ("@media all { img { width: 1px } }", Match::Yes),
+            ("@media only all { img { width: 1px } }", Match::Yes),
+            ("@media print, ALL { img { width: 1px } }", Match::Yes),
+            ("@media { img { width: 1px } }", Match::Yes),
+            ("@media not all { img { width: 1px } }", Match::Unknown),
+            (
+                "@media all and (color) { img { width: 1px } }",
+                Match::Unknown,
+            ),
+        ] {
+            assert_eq!(ask(&cascade(&[css]), IMG, None, "width").0, want, "{css}");
+        }
+    }
+
+    #[test]
+    fn imports_take_the_place_of_the_import_rule() {
+        let main = leak(
+            "@charset \"utf-8\"; @layer base;\
+             @import \"b.css\" layer(x);\
+             @import url(print.css) print;\
+             @import \"self.css\";\
+             img { width: 1px }\
+             @import \"late.css\";",
+        );
+        let b = leak("img { width: 2px; height: 2px }");
+        let print = leak("img { color: red }");
+        let late = leak("img { margin: 0 }");
+        let mut asked = Vec::new();
+        let c = Cascade::with_imports(
+            &[Sheet {
+                stylesheet: main,
+                conditional: false,
+            }],
+            |from, rule| {
+                asked.push(rule.url.to_string());
+                match rule.url.as_ref() {
+                    "b.css" => Some(b),
+                    "print.css" => Some(print),
+                    "self.css" => Some(from),
+                    "late.css" => Some(late),
+                    _ => None,
+                }
+            },
+        );
+        // Unlayered beats the imported sheet's layer `x`.
+        assert_eq!(ask(&c, IMG, None, "width").1, "width: 1px");
+        assert_eq!(ask(&c, IMG, None, "height").0, Match::Yes);
+        assert_eq!(reasons(&c, IMG, "color"), [UnknownReason::Conditional]);
+        // An `@import` after a style rule does not count.
+        assert_eq!(ask(&c, IMG, None, "margin-left").0, Match::No);
+        assert!(!asked.contains(&"late.css".to_string()));
+        // A sheet importing itself is followed once.
+        assert_eq!(asked.iter().filter(|u| *u == "self.css").count(), 1);
     }
 }

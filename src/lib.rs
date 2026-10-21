@@ -28,9 +28,10 @@ pub use at_rule::{
     parse_namespace_rule,
 };
 pub use cascade::{
-    Candidate, Cascade, ElementStyle, PropertyAnswer, Setter, Sheet, UnknownReason, UnknownReasons,
+    Candidate, Cascade, ElementStyle, MAX_IMPORT_DEPTH, PropertyAnswer, Setter, Sheet,
+    UnknownReason, UnknownReasons,
 };
-pub use matching::{Element, HTML_NAMESPACE, Match, Namespaces};
+pub use matching::{Element, HTML_NAMESPACE, MAX_MATCH_STEPS, Match, Namespaces};
 pub use parser::{
     AtRule, Block, BlockItem, BlockKind, ComponentValue, Declaration, MAX_NESTING_DEPTH,
     QualifiedRule, Rule, SimpleBlock, Stylesheet, SyntaxError, SyntaxErrorKind,
@@ -39,9 +40,9 @@ pub use parser::{
 pub use properties::longhands;
 pub use selector::{
     AnB, AttributeCase, AttributeOperator, AttributeSelector, AttributeValue, Combinator,
-    ComplexSelector, CompoundSelector, MAX_SELECTOR_DEPTH, Namespace, PseudoClass, PseudoElement,
-    QualifiedName, SelectorList, SimpleSelector, Specificity, parse_relative_selector_list,
-    parse_selector_list, type_selector_names,
+    ComplexSelector, CompoundSelector, MAX_RESOLVED_SIMPLES, MAX_SELECTOR_DEPTH, Namespace,
+    PseudoClass, PseudoElement, QualifiedName, SelectorList, SimpleSelector, Specificity,
+    parse_relative_selector_list, parse_selector_list, type_selector_names,
 };
 pub use serialize::{serialize_block_contents, serialize_stylesheet};
 pub use span::{Span, Spanned};

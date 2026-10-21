@@ -25,18 +25,30 @@
 //! - `[*|attr]`, which would need every namespace's attribute of that name;
 //! - in an HTML document, an attribute value that differs from the selector's
 //!   only in ASCII case and has no `i`/`s` flag (HTML makes some attributes
-//!   case-insensitive, and this code does not carry that list).
+//!   case-insensitive, and this code does not carry that list);
+//! - a selector that takes more than [`MAX_MATCH_STEPS`] steps to settle.
+//!   Descendant combinators inside nested `:is()` (which is what a resolved
+//!   `&` is) multiply the work by the tree's depth per level, so a hostile
+//!   stylesheet could otherwise make one answer take hours.
 //!
 //! Unknown propagates as in three-valued logic: `:not(Unknown)` is Unknown,
 //! a compound is No as soon as one part is No, and a combinator is Yes as
 //! soon as one path is Yes.
 
 use std::borrow::Cow;
+use std::cell::Cell;
 
 use crate::selector::{
     AttributeCase, AttributeOperator, AttributeSelector, Combinator, ComplexSelector,
     CompoundSelector, Namespace, PseudoClass, QualifiedName, SelectorList, SimpleSelector,
 };
+
+/// The most steps one call to [`SelectorList::matches`] or
+/// [`ComplexSelector::matches`] takes, arguments included; past it the
+/// answer is Unknown. A step is one compound tried on one element. Real
+/// selectors take far fewer: on 39 real books, a budget of 64 changed no
+/// answer.
+pub const MAX_MATCH_STEPS: u32 = 1 << 12;
 
 /// The HTML namespace. In an HTML document its elements' names, and their
 /// attributes' names, compare ASCII case-insensitively.
@@ -168,7 +180,7 @@ impl Namespaces<'_> {
 impl SelectorList<'_> {
     /// Whether any selector in the list matches `element`.
     pub fn matches<E: Element>(&self, element: &E, namespaces: &Namespaces<'_>) -> Match {
-        any(&self.selectors, |s| s.node.matches(element, namespaces))
+        Matcher::new(namespaces).list(self, element)
     }
 }
 
@@ -176,28 +188,49 @@ impl ComplexSelector<'_> {
     /// Whether this selector matches `element`, as its subject (the last
     /// compound).
     pub fn matches<E: Element>(&self, element: &E, namespaces: &Namespaces<'_>) -> Match {
-        let Some(last) = self.compounds.len().checked_sub(1) else {
-            return Match::No;
-        };
-        let m = Matcher { namespaces }.from(self, last, element);
-        // `> a` is relative to an element this selector alone does not know.
-        if self.leading.is_some() {
-            m.and(Match::Unknown)
-        } else {
-            m
-        }
+        Matcher::new(namespaces).complex(self, element)
     }
 }
 
 struct Matcher<'n, 'a> {
     namespaces: &'n Namespaces<'a>,
+    /// Steps left; see [`MAX_MATCH_STEPS`].
+    steps: Cell<u32>,
 }
 
-impl Matcher<'_, '_> {
+impl<'n, 'a> Matcher<'n, 'a> {
+    fn new(namespaces: &'n Namespaces<'a>) -> Self {
+        Matcher {
+            namespaces,
+            steps: Cell::new(MAX_MATCH_STEPS),
+        }
+    }
+
+    fn list<E: Element>(&self, list: &SelectorList<'_>, element: &E) -> Match {
+        any(&list.selectors, |s| self.complex(&s.node, element))
+    }
+
+    fn complex<E: Element>(&self, selector: &ComplexSelector<'_>, element: &E) -> Match {
+        let Some(last) = selector.compounds.len().checked_sub(1) else {
+            return Match::No;
+        };
+        let m = self.from(selector, last, element);
+        // `> a` is relative to an element this selector alone does not know.
+        if selector.leading.is_some() {
+            m.and(Match::Unknown)
+        } else {
+            m
+        }
+    }
+
     /// Whether compounds `0..=k` of `selector` match with compound `k` on
     /// `element`. Right to left: the subject first, then the combinator to
     /// its left, so a mismatch stops the walk before any ancestor is visited.
     fn from<E: Element>(&self, selector: &ComplexSelector<'_>, k: usize, element: &E) -> Match {
+        let Some(left) = self.steps.get().checked_sub(1) else {
+            return Match::Unknown;
+        };
+        self.steps.set(left);
         let here = self.compound(&selector.compounds[k].node, element);
         if here == Match::No || k == 0 {
             return here;
@@ -347,9 +380,9 @@ impl Matcher<'_, '_> {
             PseudoClass::NthLastOfType(nth) => {
                 Match::from_bool(nth.matches(index(count_of_type(element, E::next_sibling))))
             }
-            PseudoClass::Not(list) => list.matches(element, self.namespaces).not(),
+            PseudoClass::Not(list) => self.list(list, element).not(),
             PseudoClass::Is { selectors, dropped } | PseudoClass::Where { selectors, dropped } => {
-                let m = selectors.matches(element, self.namespaces);
+                let m = self.list(selectors, element);
                 if *dropped > 0 {
                     m.or(Match::Unknown)
                 } else {
@@ -380,14 +413,14 @@ impl Matcher<'_, '_> {
             }
             return Match::from_bool(nth.matches(index(n)));
         };
-        let itself = of.matches(element, self.namespaces);
+        let itself = self.list(of, element);
         if itself == Match::No {
             return Match::No;
         }
         let (mut n, mut unsure) = (0usize, false);
         let mut cur = step(element);
         while let Some(e) = cur {
-            match of.matches(&e, self.namespaces) {
+            match self.list(of, &e) {
                 Match::Yes => n += 1,
                 Match::Unknown => unsure = true,
                 Match::No => {}
@@ -846,5 +879,32 @@ mod tests {
         assert_eq!(Yes.or(Unknown), Yes);
         assert_eq!(No.or(Unknown), Unknown);
         assert_eq!(Unknown.not(), Unknown);
+    }
+
+    #[test]
+    fn a_selector_past_the_step_budget_is_unknown() {
+        // A chain of 64 `div`s. A class nobody has, then eleven descendant
+        // `*`: every way of placing the `*`s on the ancestors is tried
+        // before the class fails, far past the budget, where the answer
+        // would be No.
+        let spec: Vec<Spec<'_>> = (0..64usize)
+            .map(|i| ("div", i.checked_sub(1), &[][..]))
+            .collect();
+        let d = doc(false, &spec);
+        let deepest = El { doc: &d, i: 63 };
+        let hard = format!(".nope{}", " *".repeat(11));
+        assert_eq!(
+            list(&hard).matches(&deepest, &Namespaces::default()),
+            Match::Unknown
+        );
+        // The budget is per call: a cheap selector after it is answered.
+        assert_eq!(
+            list("div div").matches(&deepest, &Namespaces::default()),
+            Match::Yes
+        );
+        assert_eq!(
+            list(".nope div").matches(&deepest, &Namespaces::default()),
+            Match::No
+        );
     }
 }

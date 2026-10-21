@@ -92,6 +92,22 @@ pub enum MediaQuery<'a> {
     Invalid,
 }
 
+impl MediaQueryList<'_> {
+    /// Whether the list holds on every device, without evaluating any
+    /// condition: it is empty, or one of its queries is `all` or `only all`
+    /// alone. `false` means "not known to always hold", not "never holds".
+    pub fn always_holds(&self) -> bool {
+        self.queries.is_empty()
+            || self.queries.iter().any(|q| {
+                matches!(&q.node, MediaQuery::Query {
+                    qualifier: None | Some(MediaQualifier::Only),
+                    media_type: Some(t),
+                    condition: None,
+                } if t.eq_ignore_ascii_case("all"))
+            })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaQualifier {
     Not,
