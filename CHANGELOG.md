@@ -43,8 +43,10 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   `(min-orientation: portrait)`, in `@media` and `@import` queries at any
   depth of `not`/`and`/`or`. Media Queries 4 evaluates an unknown feature
   as unknown, so the query never holds. Vendor-prefixed features are exempt
-  and media types are not checked. `DiagnosticKind` gains three variants in
-  all.
+  and media types are not checked.
+- **`!important` inside a keyframe is reported**, as
+  `DiagnosticKind::ImportantInKeyframe`: CSS Animations 1 has such a
+  declaration ignored. `DiagnosticKind` gains four variants in all.
 
 - **`@supports` conditions are evaluated**: `evaluate_supports` answers
   `Yes`, `No` or `Unknown` for an `@supports` prelude (CSS Conditional 3,

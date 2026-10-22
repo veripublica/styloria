@@ -94,6 +94,10 @@ pub enum DiagnosticKind {
     /// never holds. Vendor-prefixed features are not reported, and neither
     /// are media types. The span is the feature's name.
     UnknownMediaFeature,
+    /// A declaration marked `!important` inside a keyframe of `@keyframes`:
+    /// CSS Animations 1 has it ignored, value and all. The span is the whole
+    /// declaration; `name` is the property.
+    ImportantInKeyframe,
 }
 
 /// The vocabulary a declaration's name is checked against — which set of
@@ -213,9 +217,34 @@ fn check_rule(rule: &Spanned<Rule<'_>>, nested: bool, out: &mut Vec<Diagnostic>)
                 check_items(&block.node, &vocab, out);
             } else if parser::holds_style_rules(&bare) || bare == "keyframes" {
                 check_items(&block.node, &Vocab::Property, out);
+                if bare == "keyframes" {
+                    check_keyframe_importance(&block.node, out);
+                }
             }
             // Any other at-rule's body means something this crate does not
             // know — left alone.
+        }
+    }
+}
+
+/// A declaration marked `!important` in a keyframe is ignored (CSS
+/// Animations 1, "Keyframes").
+fn check_keyframe_importance(items: &[BlockItem<'_>], out: &mut Vec<Diagnostic>) {
+    for item in items {
+        let BlockItem::Rule(r) = item else { continue };
+        let Rule::Qualified(keyframe) = &r.node else {
+            continue;
+        };
+        for d in &keyframe.block.node {
+            if let BlockItem::Declaration(d) = d
+                && d.node.important
+            {
+                out.push(Diagnostic {
+                    span: d.span,
+                    kind: DiagnosticKind::ImportantInKeyframe,
+                    name: d.node.name.to_string(),
+                });
+            }
         }
     }
 }
@@ -512,6 +541,25 @@ mod tests {
         assert_eq!(
             kinds("@charset \"utf-8\"; @viewport { width: device-width }"),
             []
+        );
+    }
+
+    #[test]
+    fn important_in_a_keyframe() {
+        let css = "@keyframes k { from { color: red !important; width: 1px } 50% { top: 0 } }\
+                   @-webkit-keyframes w { to { left: 0 ! IMPORTANT } } p { color: red !important }";
+        let d = validate_stylesheet(css);
+        let found: Vec<_> = d
+            .iter()
+            .filter(|d| d.kind == DiagnosticKind::ImportantInKeyframe)
+            .map(|d| (d.name.as_str(), d.span.slice(css)))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("color", "color: red !important"),
+                ("left", "left: 0 ! IMPORTANT")
+            ]
         );
     }
 
