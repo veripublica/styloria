@@ -46,6 +46,15 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   and media types are not checked. `DiagnosticKind` gains three variants in
   all.
 
+- **`@supports` conditions are evaluated**: `evaluate_supports` answers
+  `Yes`, `No` or `Unknown` for an `@supports` prelude (CSS Conditional 3,
+  4 and 5). A declaration is judged by its value grammar, `selector()` by
+  the selector parser, `<general-enclosed>` is `No`, and `font-tech()`,
+  `font-format()` and `at-rule()` are `Unknown`. The cascade drops an
+  `@supports` rule, or an `@import` whose `supports()` is `No`: no browser
+  applies it. A `Yes` stays conditional, since a reading system may not
+  implement the feature.
+
 ### Changed
 
 - **Rules a browser drops no longer end the `@import` section.** CSS

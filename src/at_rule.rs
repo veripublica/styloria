@@ -13,10 +13,11 @@
 
 use std::borrow::Cow;
 
-use crate::matching::Namespaces;
+use crate::matching::{Match, Namespaces};
 use crate::parser::{AtRule, BlockKind, ComponentValue, Rule, Stylesheet};
 use crate::span::{Span, Spanned};
 use crate::token::Token;
+use crate::values::{UnknownValue, ValueCheck, check_value};
 
 type Values<'a> = [Spanned<ComponentValue<'a>>];
 
@@ -354,6 +355,156 @@ pub(crate) fn placements(sheet: &Stylesheet<'_>) -> Vec<Placement> {
         out.push(place);
     }
     out
+}
+
+/// Whether an `@supports` condition (or `@import`'s `supports(…)`) holds in
+/// a browser that implements every specification (CSS Conditional 3, 4 and
+/// 5):
+///
+/// - `(property: value)`: `Yes` when the value fits the property's grammar,
+///   or uses `var()`; `No` when it cannot, or no specification defines the
+///   property; `Unknown` for a vendor-prefixed property or a value this
+///   crate cannot judge. A custom property is `Yes`.
+/// - `selector(…)`: `Yes` for one complex selector that parses, `No` when it
+///   does not, `Unknown` when it names a vendor-prefixed pseudo.
+/// - `font-tech()`, `font-format()`, `at-rule()`: `Unknown`.
+/// - Anything else in parentheses (`<general-enclosed>`): `No`, as the
+///   spec says.
+///
+/// `not`, `and` and `or` combine three-valued. A condition the grammar
+/// rejects (`and` and `or` mixed without parentheses, say) makes the rule
+/// invalid, and is `No`.
+///
+/// A real reading system implements less than every specification, so
+/// `Yes` means "can hold", not "holds there"; `No` holds everywhere.
+pub fn evaluate_supports(condition: &Values<'_>) -> Match {
+    supports_condition(&significant_values(condition), 0).unwrap_or(Match::No)
+}
+
+fn significant_values<'v, 'a>(values: &'v Values<'a>) -> Vec<&'v Spanned<ComponentValue<'a>>> {
+    values
+        .iter()
+        .filter(|cv| !matches!(cv.node, ComponentValue::Token(Token::Whitespace)))
+        .collect()
+}
+
+/// `not <in-parens> | <in-parens> [and <in-parens>]* | <in-parens> [or
+/// <in-parens>]*`; `None` when it is none of these.
+fn supports_condition(v: &[&Spanned<ComponentValue<'_>>], depth: usize) -> Option<Match> {
+    if depth > 32 {
+        return Some(Match::Unknown);
+    }
+    let keyword = |cv: &Spanned<ComponentValue<'_>>| match &cv.node {
+        ComponentValue::Token(Token::Ident(w)) => Some(w.to_ascii_lowercase()),
+        _ => None,
+    };
+    match v {
+        [] => None,
+        [not, rest @ ..] if keyword(not).as_deref() == Some("not") => match rest {
+            [one] => Some(supports_in_parens(one, depth)?.not()),
+            _ => None,
+        },
+        [first, rest @ ..] => {
+            let mut result = supports_in_parens(first, depth)?;
+            let mut joiner: Option<String> = None;
+            for pair in rest.chunks(2) {
+                let [word, operand] = pair else { return None };
+                let word = keyword(word)?;
+                if !(word == "and" || word == "or") || joiner.as_ref().is_some_and(|j| *j != word) {
+                    return None;
+                }
+                let operand = supports_in_parens(operand, depth)?;
+                result = if word == "and" {
+                    result.and(operand)
+                } else {
+                    result.or(operand)
+                };
+                joiner = Some(word);
+            }
+            Some(result)
+        }
+    }
+}
+
+/// `( <condition> )`, `( <declaration> )`, a supports function, or
+/// `<general-enclosed>`; `None` for anything that is none of these.
+fn supports_in_parens(cv: &Spanned<ComponentValue<'_>>, depth: usize) -> Option<Match> {
+    match &cv.node {
+        ComponentValue::Block(b) if b.kind == BlockKind::Paren => {
+            let inner = significant_values(&b.values);
+            if let [name, colon, ..] = inner.as_slice()
+                && let ComponentValue::Token(Token::Ident(property)) = &name.node
+                && matches!(colon.node, ComponentValue::Token(Token::Colon))
+            {
+                return Some(supports_declaration(property, &b.values));
+            }
+            // A condition in parentheses, or else `<general-enclosed>`.
+            Some(supports_condition(&inner, depth + 1).unwrap_or(Match::No))
+        }
+        ComponentValue::Function { name, args } => {
+            let is = |n: &str| name.eq_ignore_ascii_case(n);
+            Some(if is("selector") {
+                supports_selector(args)
+            } else if is("font-tech") || is("font-format") || is("at-rule") {
+                Match::Unknown
+            } else {
+                Match::No
+            })
+        }
+        _ => None,
+    }
+}
+
+/// `property: value`, with `!important` allowed after the value.
+fn supports_declaration(property: &str, block: &Values<'_>) -> Match {
+    let colon = block
+        .iter()
+        .position(|cv| matches!(cv.node, ComponentValue::Token(Token::Colon)))
+        .unwrap_or(block.len());
+    let mut value = trim(&block[colon + 1..]);
+    let at: Vec<usize> = (0..value.len())
+        .filter(|&i| !matches!(value[i].node, ComponentValue::Token(Token::Whitespace)))
+        .collect();
+    if let [.., bang, important] = at[..]
+        && matches!(value[bang].node, ComponentValue::Token(Token::Delim('!')))
+        && matches!(&value[important].node, ComponentValue::Token(Token::Ident(w)) if w.eq_ignore_ascii_case("important"))
+    {
+        value = trim(&value[..bang]);
+    }
+    match check_value(property, value) {
+        ValueCheck::Valid | ValueCheck::Unknown(UnknownValue::Substitution) => Match::Yes,
+        ValueCheck::Invalid
+        | ValueCheck::Unknown(UnknownValue::UnknownProperty | UnknownValue::Empty) => Match::No,
+        ValueCheck::Unknown(_) => Match::Unknown,
+    }
+}
+
+/// [`evaluate_supports`] for the inside of `@import`'s `supports(…)`, which
+/// also takes a bare declaration: `supports(display: grid)`.
+pub(crate) fn evaluate_import_supports(args: &Values<'_>) -> Match {
+    let v = significant_values(args);
+    if let [name, colon, ..] = v.as_slice()
+        && let ComponentValue::Token(Token::Ident(property)) = &name.node
+        && matches!(colon.node, ComponentValue::Token(Token::Colon))
+    {
+        return supports_declaration(property, args);
+    }
+    evaluate_supports(args)
+}
+
+/// `selector( <complex-selector> )`.
+fn supports_selector(args: &Values<'_>) -> Match {
+    let Ok(list) = crate::selector::parse_selector_list(args) else {
+        return Match::No;
+    };
+    if list.selectors.len() != 1 {
+        return Match::No;
+    }
+    // A vendor-prefixed pseudo depends on the browser.
+    let prefixed = args.iter().any(|cv| {
+        matches!(&cv.node, ComponentValue::Token(Token::Ident(n)) | ComponentValue::Function { name: n, .. } if n.starts_with('-'))
+    });
+    if prefixed { Match::Unknown } else { Match::Yes }
 }
 
 /// Media features of the "range" type, which also take `min-` and `max-`
@@ -845,6 +996,45 @@ mod tests {
             crate::pseudos::PSEUDO_ELEMENT_FUNCTIONS,
         ] {
             assert!(table.windows(2).all(|w| w[0] < w[1]), "{table:?}");
+        }
+    }
+
+    #[test]
+    fn supports_conditions_three_valued() {
+        use Match::{No, Unknown as U, Yes};
+        let eval = |cond: &str| {
+            let css = format!("@supports {cond} {{}}");
+            let (sheet, _) = crate::parse_stylesheet(&css);
+            evaluate_supports(sheet.rules[0].node.prelude())
+        };
+        for (cond, want) in [
+            ("(display: grid)", Yes),
+            ("(DISPLAY: Grid !important)", Yes),
+            ("(display: gird)", No),
+            ("(colr: red)", No),
+            ("(color:)", No),
+            ("(--x: anything at all)", Yes),
+            ("(color: var(--c))", Yes),
+            ("(-webkit-box-flex: 1)", U),
+            ("not (display: gird)", Yes),
+            ("not (-webkit-box-flex: 1)", U),
+            ("(display: grid) and (display: gird)", No),
+            ("(display: grid) or (display: gird)", Yes),
+            ("(display: gird) or (-webkit-box-flex: 1)", U),
+            ("((display: grid) and (gap: 1px)) or (x: y)", Yes),
+            ("selector(a > b:hover)", Yes),
+            ("selector(a:hovr)", No),
+            ("selector(a, b)", No),
+            ("selector(::-webkit-scrollbar)", U),
+            ("font-tech(color-COLRv1)", U),
+            ("(anything at all)", No),
+            ("foo(bar)", No),
+            // The grammar rejects these: the rule is invalid.
+            ("(display: grid) and (gap: 1px) or (x: y)", No),
+            ("display: grid", No),
+            ("not not (display: grid)", No),
+        ] {
+            assert_eq!(eval(cond), want, "{cond}");
         }
     }
 }

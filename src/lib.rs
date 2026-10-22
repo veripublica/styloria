@@ -45,7 +45,7 @@ pub mod values;
 
 pub use at_rule::{
     ImportLayer, ImportRule, LayerName, LayerRule, MediaQualifier, MediaQuery, MediaQueryList,
-    NamespaceRule, parse_import_rule, parse_layer_rule, parse_media_query_list,
+    NamespaceRule, evaluate_supports, parse_import_rule, parse_layer_rule, parse_media_query_list,
     parse_namespace_rule,
 };
 pub use cascade::{

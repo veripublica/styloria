@@ -88,8 +88,8 @@
 //! modelled.
 
 use crate::at_rule::{
-    ImportLayer, ImportRule, LayerName, LayerRule, Placement, parse_import_rule, parse_layer_rule,
-    parse_media_query_list, placements,
+    ImportLayer, ImportRule, LayerName, LayerRule, Placement, evaluate_import_supports,
+    evaluate_supports, parse_import_rule, parse_layer_rule, parse_media_query_list, placements,
 };
 use crate::matching::{Element, Match, Namespaces};
 use crate::parser::{self, AtRule, BlockItem, ComponentValue, Declaration, Rule, Stylesheet};
@@ -686,6 +686,14 @@ impl<'s, 'a> Builder<'_, 's, 'a> {
             ImportLayer::Anonymous => self.layers.anonymous(ctx.layer),
             ImportLayer::Named(n) => self.layers.declare(ctx.layer, n),
         };
+        // A `supports()` no browser can meet keeps the sheet out.
+        if rule
+            .supports
+            .as_ref()
+            .is_some_and(|s| evaluate_import_supports(s) == Match::No)
+        {
+            return;
+        }
         let conditional = rule.supports.is_some() || !rule.media.always_holds();
         let reasons = ctx.reasons.with_if(UnknownReason::Conditional, conditional);
         self.sheet(sheet, layer, reasons);
@@ -734,6 +742,11 @@ impl<'s, 'a> Builder<'_, 's, 'a> {
                         // An invalid `@layer` is dropped with its contents.
                         _ => return,
                     }
+                } else if bare.eq_ignore_ascii_case("supports")
+                    && evaluate_supports(&at.prelude) == Match::No
+                {
+                    // No browser meets the condition: nothing in it applies.
+                    return;
                 } else if parser::holds_style_rules(bare) {
                     ctx.layer
                 } else {
@@ -1386,6 +1399,32 @@ mod tests {
         assert!(!asked.contains(&"late.css".to_string()));
         // A sheet importing itself is followed once.
         assert_eq!(asked.iter().filter(|u| *u == "self.css").count(), 1);
+    }
+
+    #[test]
+    fn a_supports_condition_no_browser_meets_applies_nowhere() {
+        let c = cascade(&["@supports (display: gird) { img { width: 1px } }"]);
+        assert_eq!(ask(&c, IMG, None, "width").0, Match::No);
+        let c = cascade(&["@supports not (display: gird) { img { width: 1px } }"]);
+        assert_eq!(reasons(&c, IMG, "width"), [UnknownReason::Conditional]);
+        let main = leak(
+            "@import \"a.css\" supports(display: gird); @import \"b.css\" supports(display: grid);",
+        );
+        let a = leak("img { width: 1px }");
+        let b = leak("img { height: 1px }");
+        let c = Cascade::with_imports(
+            &[Sheet {
+                stylesheet: main,
+                conditional: false,
+            }],
+            |_, rule| match rule.url.as_ref() {
+                "a.css" => Some(a),
+                "b.css" => Some(b),
+                _ => None,
+            },
+        );
+        assert_eq!(ask(&c, IMG, None, "width").0, Match::No);
+        assert_eq!(reasons(&c, IMG, "height"), [UnknownReason::Conditional]);
     }
 
     #[test]
