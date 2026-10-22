@@ -42,7 +42,10 @@
 //! name is safe; flagging a real one is not.** So every exemption below errs
 //! toward silence.
 
-use crate::at_rule::{Placement, is_known_at_rule, placements};
+use crate::at_rule::{
+    MediaQuery, Placement, is_known_at_rule, is_known_media_feature, media_feature_names,
+    parse_import_rule, parse_media_query_list, placements,
+};
 use crate::descriptors::descriptors_for;
 use crate::known_properties::is_known_property;
 use crate::parser::{self, BlockItem, Rule, Stylesheet};
@@ -85,6 +88,12 @@ pub enum DiagnosticKind {
     /// ignores it. Rules a browser drops (unknown at-rules, style rules with
     /// an invalid selector) do not count. The span is the at-keyword.
     MisplacedAtRule,
+    /// A media feature no specification defines, in an `@media` or
+    /// `@import` media query: `(min-widht: 600px)`, `(min-orientation:
+    /// portrait)`. Media Queries 4 evaluates it as unknown, so the query
+    /// never holds. Vendor-prefixed features are not reported, and neither
+    /// are media types. The span is the feature's name.
+    UnknownMediaFeature,
 }
 
 /// The vocabulary a declaration's name is checked against — which set of
@@ -146,6 +155,23 @@ fn report_at_rule(at: &parser::AtRule<'_>, kind: DiagnosticKind, out: &mut Vec<D
     });
 }
 
+fn check_media_features(
+    condition: &[Spanned<parser::ComponentValue<'_>>],
+    out: &mut Vec<Diagnostic>,
+) {
+    for name in media_feature_names(condition) {
+        if let parser::ComponentValue::Token(crate::Token::Ident(n)) = &name.node
+            && !is_known_media_feature(n)
+        {
+            out.push(Diagnostic {
+                span: name.span,
+                kind: DiagnosticKind::UnknownMediaFeature,
+                name: n.to_string(),
+            });
+        }
+    }
+}
+
 fn check_rule(rule: &Spanned<Rule<'_>>, nested: bool, out: &mut Vec<Diagnostic>) {
     match &rule.node {
         Rule::Qualified(q) => check_items(&q.block.node, &Vocab::Property, out),
@@ -158,6 +184,21 @@ fn check_rule(rule: &Spanned<Rule<'_>>, nested: bool, out: &mut Vec<Diagnostic>)
             let is = |n: &str| at.name.eq_ignore_ascii_case(n);
             if nested && (is("import") || is("namespace")) {
                 report_at_rule(at, DiagnosticKind::MisplacedAtRule, out);
+            }
+            let media = if is("media") {
+                Some(parse_media_query_list(&at.prelude))
+            } else if is("import") {
+                parse_import_rule(&at.prelude).map(|r| r.media)
+            } else {
+                None
+            };
+            for query in media.iter().flat_map(|m| &m.queries) {
+                if let MediaQuery::Query {
+                    condition: Some(c), ..
+                } = &query.node
+                {
+                    check_media_features(c, out);
+                }
             }
             let Some(block) = &at.block else { return };
             let bare = parser::unprefixed(&at.name).to_ascii_lowercase();
@@ -472,6 +513,40 @@ mod tests {
             kinds("@charset \"utf-8\"; @viewport { width: device-width }"),
             []
         );
+    }
+
+    #[test]
+    fn unknown_media_features() {
+        use DiagnosticKind::UnknownMediaFeature as F;
+        let f = |n: &str| (F, n.to_string());
+        assert_eq!(kinds("@media (min-widht: 600px) { }"), [f("min-widht")]);
+        assert_eq!(
+            kinds("@media screen and (orientaton: portrait) { }"),
+            [f("orientaton")]
+        );
+        assert_eq!(
+            kinds("@media (min-orientation: portrait) { }"),
+            [f("min-orientation")]
+        );
+        assert_eq!(
+            kinds("@media not ((colr) or (width < 1px)) { }"),
+            [f("colr")]
+        );
+        assert_eq!(kinds("@media (400px < widht <= 700px) { }"), [f("widht")]);
+        assert_eq!(kinds("@import \"a.css\" (hoverr);"), [f("hoverr")]);
+        let css = "@media print, (min-widht: 1px) { }";
+        assert_eq!(validate_stylesheet(css)[0].span.slice(css), "min-widht");
+        // Known, in every form; vendor-prefixed; media types are not checked.
+        assert_eq!(
+            kinds(
+                "@media (min-width: 1px) and (MAX-HEIGHT: 2px), (color), (width >= 600px),\
+                 (prefers-color-scheme: dark), (-webkit-min-device-pixel-ratio: 2),\
+                 amzn-kf8, not tty and (hover) { }"
+            ),
+            []
+        );
+        // Not a feature test: left alone.
+        assert_eq!(kinds("@media (foo bar baz) { } @media (a < b < c) { }"), []);
     }
 
     #[test]

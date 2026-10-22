@@ -356,6 +356,150 @@ pub(crate) fn placements(sheet: &Stylesheet<'_>) -> Vec<Placement> {
     out
 }
 
+/// Media features of the "range" type, which also take `min-` and `max-`
+/// (Media Queries 4 and 5; `video-*` from earlier Media Queries 5 drafts).
+const RANGE_MEDIA_FEATURES: &[&str] = &[
+    "aspect-ratio",
+    "color",
+    "color-index",
+    "device-aspect-ratio",
+    "device-height",
+    "device-width",
+    "height",
+    "horizontal-viewport-segments",
+    "monochrome",
+    "resolution",
+    "vertical-viewport-segments",
+    "video-height",
+    "video-resolution",
+    "video-width",
+    "width",
+];
+
+/// Discrete media features (Media Queries 4 and 5, Web App Manifest's
+/// `display-mode`, Device Posture's `device-posture`, Round Display's
+/// `shape`).
+const DISCRETE_MEDIA_FEATURES: &[&str] = &[
+    "any-hover",
+    "any-pointer",
+    "color-gamut",
+    "device-posture",
+    "display-mode",
+    "dynamic-range",
+    "environment-blending",
+    "forced-colors",
+    "grid",
+    "hover",
+    "inverted-colors",
+    "light-level",
+    "nav-controls",
+    "orientation",
+    "overflow-block",
+    "overflow-inline",
+    "pointer",
+    "prefers-color-scheme",
+    "prefers-contrast",
+    "prefers-reduced-data",
+    "prefers-reduced-motion",
+    "prefers-reduced-transparency",
+    "scan",
+    "scripting",
+    "shape",
+    "update",
+    "video-color-gamut",
+    "video-dynamic-range",
+];
+
+/// Whether some specification defines a media feature of this name. A
+/// vendor-prefixed name (`-webkit-min-device-pixel-ratio`) always counts.
+pub(crate) fn is_known_media_feature(name: &str) -> bool {
+    if name.starts_with('-') {
+        return true;
+    }
+    let lower = name.to_ascii_lowercase();
+    let range = |n: &str| RANGE_MEDIA_FEATURES.binary_search(&n).is_ok();
+    match lower.strip_prefix("min-").or(lower.strip_prefix("max-")) {
+        Some(base) => range(base),
+        None => {
+            range(&lower)
+                || DISCRETE_MEDIA_FEATURES
+                    .binary_search(&lower.as_str())
+                    .is_ok()
+        }
+    }
+}
+
+/// The names of the media features a condition tests, with their spans:
+/// `(name)`, `(name: value)` and the range forms, at any depth of `not`,
+/// `and`, `or` and parentheses. A parenthesis that is none of these (the
+/// spec's `<general-enclosed>`) yields nothing, and so does a range whose
+/// name is not clear.
+pub(crate) fn media_feature_names<'v, 'a>(
+    condition: &'v Values<'a>,
+) -> Vec<&'v Spanned<ComponentValue<'a>>> {
+    let mut out = Vec::new();
+    feature_names(condition, &mut out, 0);
+    out
+}
+
+fn feature_names<'v, 'a>(
+    values: &'v Values<'a>,
+    out: &mut Vec<&'v Spanned<ComponentValue<'a>>>,
+    depth: usize,
+) {
+    if depth > 32 {
+        return;
+    }
+    for v in values {
+        let ComponentValue::Block(b) = &v.node else {
+            continue;
+        };
+        if b.kind != BlockKind::Paren {
+            continue;
+        }
+        let inner: Vec<&Spanned<ComponentValue<'a>>> = b
+            .values
+            .iter()
+            .filter(|cv| !matches!(cv.node, ComponentValue::Token(Token::Whitespace)))
+            .collect();
+        let ident = |cv: &Spanned<ComponentValue<'a>>| {
+            matches!(cv.node, ComponentValue::Token(Token::Ident(_)))
+        };
+        let nested = match inner.first().map(|cv| &cv.node) {
+            Some(ComponentValue::Block(inner)) => inner.kind == BlockKind::Paren,
+            Some(ComponentValue::Token(Token::Ident(w))) => w.eq_ignore_ascii_case("not"),
+            _ => false,
+        };
+        if nested {
+            feature_names(&b.values, out, depth + 1);
+            continue;
+        }
+        match inner.as_slice() {
+            // `(name)`
+            [name] if ident(name) => out.push(name),
+            // `(name: value…)`
+            [name, colon, ..]
+                if ident(name) && matches!(colon.node, ComponentValue::Token(Token::Colon)) =>
+            {
+                out.push(name)
+            }
+            // A range: the one identifier beside a comparison.
+            _ => {
+                let compares = inner.iter().any(|cv| {
+                    matches!(
+                        cv.node,
+                        ComponentValue::Token(Token::Delim('<' | '>' | '='))
+                    )
+                });
+                let mut idents = inner.iter().filter(|cv| ident(cv));
+                if compares && let (Some(name), None) = (idents.next(), idents.next()) {
+                    out.push(name);
+                }
+            }
+        }
+    }
+}
+
 fn media_query<'a>(part: &Values<'a>) -> Option<MediaQuery<'a>> {
     let start = skip_ws(part, 0);
     let ident = |i: usize| match part.get(i).map(|cv| &cv.node) {
@@ -682,5 +826,25 @@ mod tests {
         let list = parse_media_query_list(sheet.rules[0].node.prelude());
         let spans: Vec<_> = list.queries.iter().map(|q| q.span.slice(css)).collect();
         assert_eq!(spans, ["screen", "print and (color)"]);
+    }
+
+    #[test]
+    fn name_tables_are_sorted_and_lowercase() {
+        for table in [
+            KNOWN_AT_RULES,
+            RANGE_MEDIA_FEATURES,
+            DISCRETE_MEDIA_FEATURES,
+        ] {
+            assert!(table.windows(2).all(|w| w[0] < w[1]), "{table:?}");
+            assert!(table.iter().all(|n| *n == n.to_ascii_lowercase()));
+        }
+        for table in [
+            crate::pseudos::PSEUDO_CLASSES,
+            crate::pseudos::PSEUDO_CLASS_FUNCTIONS,
+            crate::pseudos::PSEUDO_ELEMENTS,
+            crate::pseudos::PSEUDO_ELEMENT_FUNCTIONS,
+        ] {
+            assert!(table.windows(2).all(|w| w[0] < w[1]), "{table:?}");
+        }
     }
 }

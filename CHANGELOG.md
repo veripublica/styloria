@@ -37,7 +37,14 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   (`@medai`, `@fontface`; vendor-prefixed names exempt), and
   `DiagnosticKind::MisplacedAtRule` for an `@import` after another valid
   rule, an `@namespace` after one other than `@import`, or either inside a
-  block. A browser ignores both. `DiagnosticKind` gains two variants.
+  block. A browser ignores both.
+- **Unknown media features are reported**, as
+  `DiagnosticKind::UnknownMediaFeature`: `(min-widht: 600px)`,
+  `(min-orientation: portrait)`, in `@media` and `@import` queries at any
+  depth of `not`/`and`/`or`. Media Queries 4 evaluates an unknown feature
+  as unknown, so the query never holds. Vendor-prefixed features are exempt
+  and media types are not checked. `DiagnosticKind` gains three variants in
+  all.
 
 ### Changed
 
