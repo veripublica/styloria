@@ -72,7 +72,10 @@ pub use selector::{
     PseudoClass, PseudoElement, QualifiedName, SelectorList, SimpleSelector, Specificity,
     parse_relative_selector_list, parse_selector_list,
 };
-pub use serialize::{serialize_block_contents, serialize_stylesheet};
+pub use serialize::{
+    XmlSafeError, XmlSafeErrorKind, serialize_block_contents, serialize_stylesheet,
+    serialize_stylesheet_for_xml,
+};
 pub use span::{Span, Spanned};
 pub use token::{NumericType, Token};
 pub use tokenizer::{SpannedTokens, Tokenizer};
