@@ -718,10 +718,7 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
         "hanging-punctuation",
         "none | [ first || [ force-end | allow-end ] || last ]",
     ),
-    (
-        "height",
-        "auto | <length-percentage [0,∞]> | min-content | max-content | fit-content | fit-content(<length-percentage [0,∞]>) | <calc-size()> | <anchor-size()>",
-    ),
+    ("height", "auto | <box-size> | <anchor-size()>"),
     ("hyphenate-character", "auto | <string>"),
     ("hyphenate-limit-chars", "[ auto | <integer> ]{1,3}"),
     ("hyphens", "none | manual | auto"),
@@ -729,7 +726,10 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
         "image-orientation",
         "from-image | <angle> | [ <angle>? flip ]",
     ),
-    ("image-rendering", "auto | crisp-edges | pixelated | smooth"),
+    (
+        "image-rendering",
+        "auto | smooth | high-quality | pixelated | crisp-edges | optimizeSpeed | optimizeQuality",
+    ),
     (
         "image-resolution",
         "[ from-image || <resolution> ] && snap?",
@@ -847,26 +847,14 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
     ("math-shift", "normal | compact"),
     ("math-style", "normal | compact"),
     ("max-block-size", "<'max-width'>"),
-    (
-        "max-height",
-        "none | <length-percentage [0,∞]> | min-content | max-content | fit-content | fit-content(<length-percentage [0,∞]>) | <calc-size()> | <anchor-size()>",
-    ),
+    ("max-height", "none | <box-size> | <anchor-size()>"),
     ("max-inline-size", "<'max-width'>"),
     ("max-lines", "none | <integer>"),
-    (
-        "max-width",
-        "none | <length-percentage [0,∞]> | min-content | max-content | fit-content | fit-content(<length-percentage [0,∞]>) | <calc-size()> | <anchor-size()>",
-    ),
+    ("max-width", "none | <box-size> | <anchor-size()>"),
     ("min-block-size", "<'min-width'>"),
-    (
-        "min-height",
-        "auto | <length-percentage [0,∞]> | min-content | max-content | fit-content | fit-content(<length-percentage [0,∞]>) | <calc-size()> | <anchor-size()>",
-    ),
+    ("min-height", "auto | <box-size> | <anchor-size()>"),
     ("min-inline-size", "<'min-width'>"),
-    (
-        "min-width",
-        "auto | <length-percentage [0,∞]> | min-content | max-content | fit-content | fit-content(<length-percentage [0,∞]>) | <calc-size()> | <anchor-size()>",
-    ),
+    ("min-width", "auto | <box-size> | <anchor-size()>"),
     (
         "mix-blend-mode",
         "<blend-mode> | plus-darker | plus-lighter",
@@ -1089,7 +1077,7 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
     ("table-layout", "auto | fixed"),
     (
         "text-align",
-        "start | end | left | right | center | justify | match-parent",
+        "start | end | left | right | center | justify | match-parent | justify-all",
     ),
     (
         "text-align-last",
@@ -1148,7 +1136,10 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
         "text-indent",
         "<length-percentage> && hanging? && each-line?",
     ),
-    ("text-justify", "auto | inter-character | inter-word | none"),
+    (
+        "text-justify",
+        "auto | none | inter-word | inter-character | distribute",
+    ),
     ("text-orientation", "mixed | upright | sideways"),
     ("text-overflow", "[ clip | ellipsis | <string> ]{1,2}"),
     (
@@ -1275,10 +1266,7 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
         "collapse | preserve | preserve-breaks | preserve-spaces | break-spaces",
     ),
     ("widows", "<integer>"),
-    (
-        "width",
-        "auto | <length-percentage [0,∞]> | min-content | max-content | fit-content | fit-content(<length-percentage [0,∞]>) | <calc-size()> | <anchor-size()>",
-    ),
+    ("width", "auto | <box-size> | <anchor-size()>"),
     ("will-change", "auto | <animateable-feature>#"),
     ("window-drag", "none | move"),
     (
@@ -1307,6 +1295,10 @@ pub(crate) const TYPE_SYNTAXES: &[(&str, &str)] = &[
         "xx-small | x-small | small | medium | large | x-large | xx-large | xxx-large",
     ),
     ("acos()", "acos( <calc-sum> )"),
+    (
+        "alpha()",
+        "alpha( from <color> / [ <alpha-value> | none | alpha ] )",
+    ),
     ("alpha-value", "<number> | <percentage>"),
     (
         "an+b",
@@ -1397,6 +1389,10 @@ pub(crate) const TYPE_SYNTAXES: &[(&str, &str)] = &[
         "normal | multiply | screen | overlay | darken | lighten | color-dodge | color-burn | hard-light | soft-light | difference | exclusion | hue | saturation | color | luminosity",
     ),
     ("blur()", "blur( <length>? )"),
+    (
+        "box-size",
+        "<length-percentage [0,∞]> | stretch | contain | min-content | max-content | fit-content | stretch( <length-percentage [0,∞]> ) | fit-content( <length-percentage [0,∞]> ) | <calc-size()>",
+    ),
     ("brightness()", "brightness( [ <number> | <percentage> ]? )"),
     ("calc()", "calc( <calc-sum> )"),
     ("calc-constant", "e | pi | infinity | -infinity | NaN"),
@@ -1404,10 +1400,25 @@ pub(crate) const TYPE_SYNTAXES: &[(&str, &str)] = &[
         "calc-product",
         "<calc-value> [ '*' <calc-value> | '/' <number> ]*",
     ),
-    ("calc-size()", "calc-size( <calc-size-basis>, <calc-sum> )"),
+    (
+        "calc-size()",
+        "calc-size( any , <calc-sum> ) | calc-size( [ <size-keyword> | <calc-sum> | <calc-size()> ] , <calc-size-sum> )",
+    ),
     (
         "calc-size-basis",
-        "<intrinsic-size-keyword> | <calc-size()> | any | <calc-sum>",
+        "<size-keyword> | <calc-sum> | <calc-size()> | any",
+    ),
+    (
+        "calc-size-product",
+        "<calc-size-value> [ [ '*' | '/' ] <calc-size-value> ]*",
+    ),
+    (
+        "calc-size-sum",
+        "<calc-size-product> [ [ '+' | '-' ] <calc-size-product> ]*",
+    ),
+    (
+        "calc-size-value",
+        "<number> | <dimension> | <percentage> | <calc-constant> | size | ( <calc-size-sum> )",
     ),
     (
         "calc-sum",
@@ -1419,7 +1430,10 @@ pub(crate) const TYPE_SYNTAXES: &[(&str, &str)] = &[
     ),
     ("cf-final-image", "<image> | <color>"),
     ("cf-mixing-image", "<percentage>? && <image>"),
-    ("circle()", "circle( <radial-size>? [ at <position> ]? )"),
+    (
+        "circle()",
+        "circle( [ <radial-extent>{1,2} | <length-percentage [0,∞]> ]? [ at <position> ]? )",
+    ),
     ("clamp()", "clamp( <calc-sum>#{3} )"),
     ("class-selector", "'.' <ident-token>"),
     ("clip-source", "<url>"),
@@ -1429,7 +1443,7 @@ pub(crate) const TYPE_SYNTAXES: &[(&str, &str)] = &[
     ),
     (
         "color()",
-        "color( [ from <color> ]? <colorspace-params> [ / [ <alpha-value> | none ] ]? )",
+        "color( <colorspace-params> [ / [ <alpha-value> | none ] ]? ) | color( from <color> [ <predefined-rgb> [ <number> | <percentage> | none | <rgb-keyword> ]{3} [ / [ <alpha-value> | none | <rgb-keyword> ] ]? | <xyz> [ <number> | <percentage> | none | <xyz-keyword> ]{3} [ / [ <alpha-value> | none | <xyz-keyword> ] ]? | <dashed-ident> [ <number> | <percentage> | none | <ident> ]+ [ / [ <alpha-value> | none | <ident> ] ]? ] )",
     ),
     (
         "color-base",
@@ -1441,7 +1455,7 @@ pub(crate) const TYPE_SYNTAXES: &[(&str, &str)] = &[
     ),
     (
         "color-function",
-        "<rgb()> | <rgba()> | <hsl()> | <hsla()> | <hwb()> | <lab()> | <lch()> | <oklab()> | <oklch()> | <color()>",
+        "<rgb()> | <rgba()> | <hsl()> | <hsla()> | <hwb()> | <lab()> | <lch()> | <oklab()> | <oklch()> | <alpha()> | <color()>",
     ),
     (
         "color-interpolation-method",
@@ -1571,7 +1585,7 @@ pub(crate) const TYPE_SYNTAXES: &[(&str, &str)] = &[
     ("display-box", "contents | none"),
     (
         "display-inside",
-        "flow | flow-root | table | flex | grid | ruby",
+        "flow | flow-root | table | flex | grid | ruby | math",
     ),
     (
         "display-internal",
@@ -1713,11 +1727,12 @@ pub(crate) const TYPE_SYNTAXES: &[(&str, &str)] = &[
     ),
     (
         "hsl()",
-        "hsl( <hue>, <percentage>, <percentage>, <alpha-value>? ) | hsl( [ <hue> | none ] [ <percentage> | <number> | none ] [ <percentage> | <number> | none ] [ / [ <alpha-value> | none ] ]? )",
+        "hsl( <hue>, <percentage>, <percentage>, <alpha-value>? ) | hsl( [ from <color> ]? [ <hue> | none | <hsl-keyword> ] [ <percentage> | <number> | none | <hsl-keyword> ]{2} [ / [ <alpha-value> | none | <hsl-keyword> ] ]? )",
     ),
+    ("hsl-keyword", "h | s | l | alpha"),
     (
         "hsla()",
-        "hsla( <hue>, <percentage>, <percentage>, <alpha-value>? ) | hsla( [ <hue> | none ] [ <percentage> | <number> | none ] [ <percentage> | <number> | none ] [ / [ <alpha-value> | none ] ]? )",
+        "hsla( <hue>, <percentage>, <percentage>, <alpha-value>? ) | hsla( [ from <color> ]? [ <hue> | none | <hsl-keyword> ] [ <percentage> | <number> | none | <hsl-keyword> ]{2} [ / [ <alpha-value> | none | <hsl-keyword> ] ]? )",
     ),
     ("hue", "<number> | <angle>"),
     (
@@ -1727,8 +1742,9 @@ pub(crate) const TYPE_SYNTAXES: &[(&str, &str)] = &[
     ("hue-rotate()", "hue-rotate( [ <angle> | <zero> ]? )"),
     (
         "hwb()",
-        "hwb( [ <hue> | none ] [ <percentage> | <number> | none ] [ <percentage> | <number> | none ] [ / [ <alpha-value> | none ] ]? )",
+        "hwb( [ from <color> ]? [ <hue> | none | <hwb-keyword> ] [ <percentage> | <number> | none | <hwb-keyword> ]{2} [ / [ <alpha-value> | none | <hwb-keyword> ] ]? )",
     ),
+    ("hwb-keyword", "h | w | b | alpha"),
     ("hypot()", "hypot( <calc-sum># )"),
     ("id-selector", "<hash-token>"),
     (
@@ -1769,14 +1785,16 @@ pub(crate) const TYPE_SYNTAXES: &[(&str, &str)] = &[
     ("keyframes-name", "<custom-ident> | <string>"),
     (
         "lab()",
-        "lab( [<percentage> | <number> | none] [ <percentage> | <number> | none] [ <percentage> | <number> | none] [ / [<alpha-value> | none] ]? )",
+        "lab( [ from <color> ]? [ <percentage> | <number> | none | <lab-keyword> ]{3} [ / [ <alpha-value> | none | <lab-keyword> ] ]? )",
     ),
+    ("lab-keyword", "l | a | b | alpha"),
     ("layer()", "layer( <layer-name> )"),
     ("layer-name", "<ident> [ '.' <ident> ]*"),
     (
         "lch()",
-        "lch( [<percentage> | <number> | none] [ <percentage> | <number> | none] [ <hue> | none] [ / [<alpha-value> | none] ]? )",
+        "lch( [ from <color> ]? [ <percentage> | <number> | none | <lch-keyword> ]{2} [ <hue> | none | <lch-keyword> ] [ / [ <alpha-value> | none | <lch-keyword> ] ]? )",
     ),
+    ("lch-keyword", "l | c | h | alpha"),
     ("leader()", "leader( <leader-type> )"),
     ("leader-type", "dotted | solid | space | <string>"),
     ("length-percentage", "<length> | <percentage>"),
@@ -1884,11 +1902,11 @@ pub(crate) const TYPE_SYNTAXES: &[(&str, &str)] = &[
     ("offset-path", "<ray()> | <url> | <basic-shape>"),
     (
         "oklab()",
-        "oklab( [ <percentage> | <number> | none] [ <percentage> | <number> | none] [ <percentage> | <number> | none] [ / [<alpha-value> | none] ]? )",
+        "oklab( [ from <color> ]? [ <percentage> | <number> | none | <lab-keyword> ]{3} [ / [ <alpha-value> | none | <lab-keyword> ] ]? )",
     ),
     (
         "oklch()",
-        "oklch( [ <percentage> | <number> | none] [ <percentage> | <number> | none] [ <hue> | none] [ / [<alpha-value> | none] ]? )",
+        "oklch( [ from <color> ]? [ <percentage> | <number> | none | <lch-keyword> ]{2} [ <hue> | none | <lch-keyword> ] [ / [ <alpha-value> | none | <lch-keyword> ] ]? )",
     ),
     ("opacity()", "opacity( [ <number> | <percentage> ]? )"),
     ("opacity-value", "<number> | <percentage>"),
@@ -1980,7 +1998,7 @@ pub(crate) const TYPE_SYNTAXES: &[(&str, &str)] = &[
     ("radial-shape", "circle | ellipse"),
     (
         "radial-size",
-        "<radial-extent> | <length [0,∞]> | <length-percentage [0,∞]>{2}",
+        "<radial-extent>{1,2} | <length-percentage [0,∞]>{1,2}",
     ),
     ("ratio", "<number [0,∞]> [ / <number [0,∞]> ]?"),
     (
@@ -2022,11 +2040,12 @@ pub(crate) const TYPE_SYNTAXES: &[(&str, &str)] = &[
     ("reversed-counter-name", "reversed( <counter-name> )"),
     (
         "rgb()",
-        "rgb( <percentage>#{3} , <alpha-value>? ) | rgb( <number>#{3} , <alpha-value>? ) | rgb( [ <number> | <percentage> | none ]{3} [ / [ <alpha-value> | none ] ]? )",
+        "rgb( <percentage>#{3} , <alpha-value>? ) | rgb( <number>#{3} , <alpha-value>? ) | rgb( [ <number> | <percentage> | none ]{3} [ / [ <alpha-value> | none ] ]? ) | rgb( from <color> [ <number> | <percentage> | none | <rgb-keyword> ]{3} [ / [ <alpha-value> | none | <rgb-keyword> ] ]? )",
     ),
+    ("rgb-keyword", "r | g | b | alpha"),
     (
         "rgba()",
-        "rgba( <percentage>#{3} , <alpha-value>? ) | rgba( <number>#{3} , <alpha-value>? ) | rgba( [ <number> | <percentage> | none ]{3} [ / [ <alpha-value> | none ] ]? )",
+        "rgba( <percentage>#{3} , <alpha-value>? ) | rgba( <number>#{3} , <alpha-value>? ) | rgba( [ <number> | <percentage> | none ]{3} [ / [ <alpha-value> | none ] ]? ) | rgba( from <color> [ <number> | <percentage> | none | <rgb-keyword> ]{3} [ / [ <alpha-value> | none | <rgb-keyword> ] ]? )",
     ),
     ("rotate()", "rotate( [ <angle> | <zero> ] )"),
     (
@@ -2104,6 +2123,10 @@ pub(crate) const TYPE_SYNTAXES: &[(&str, &str)] = &[
         "closest-side | farthest-side | closest-corner | farthest-corner | <length> | <length-percentage>{2}",
     ),
     ("size-feature", "<media-query-list>"),
+    (
+        "size-keyword",
+        "auto | stretch | contain | min-content | max-content | fit-content | stretch( <length-percentage [0,∞]> ) | fit-content( <length-percentage [0,∞]> )",
+    ),
     (
         "skew()",
         "skew( [ <angle> | <zero> ] , [ <angle> | <zero> ]? )",
@@ -2247,8 +2270,16 @@ pub(crate) const TYPE_SYNTAXES: &[(&str, &str)] = &[
         "xywh( <length-percentage>{2} <length-percentage [0,∞]>{2} [ round <'border-radius'> ]? )",
     ),
     ("xyz", "xyz | xyz-d50 | xyz-d65"),
+    ("xyz-keyword", "x | y | z | alpha"),
     ("xyz-params", "<xyz> [ <number> | <percentage> | none ]{3}"),
 ];
 
-pub(crate) const UNKNOWN_KEYWORDS: &[(&str, &[&str])] =
-    &[("display", &["oeb-page-head", "oeb-page-foot"])];
+pub(crate) const UNKNOWN_KEYWORDS: &[(&str, &[&str])] = &[
+    ("display", &["oeb-page-head", "oeb-page-foot"]),
+    ("outline", &["invert"]),
+    ("outline-color", &["invert"]),
+    (
+        "writing-mode",
+        &["lr", "lr-tb", "rl", "rl-tb", "tb", "tb-rl"],
+    ),
+];

@@ -50,7 +50,8 @@ assert_eq!(rule.span.start_line_col(css), (1, 1));
   `@namespace` rules, and values that cannot fit their property's
   or descriptor's grammar (`color: 12px`, `@font-face { font-display: fast }`),
   each with the span to underline. The grammars
-  are mdn-data's. It errs toward silence: a value is invalid only when even
+  are mdn-data's, corrected against the specifications where mdn lags
+  behind them. It errs toward silence: a value is invalid only when even
   a lenient reading fails, and custom properties, vendor prefixes and
   `var()` are left alone.
 - **References** (`references` module): every URL a stylesheet names, with

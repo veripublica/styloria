@@ -9,6 +9,29 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- `check_value` no longer calls spec-valid values invalid where mdn-data's
+  grammars lag behind the specifications. Each correction names its source
+  in the grammar generator:
+  - CSS Text 3: `text-align: justify-all`, `text-justify: distribute`.
+  - CSS Images 3: `image-rendering: optimizeSpeed` and `optimizeQuality`,
+    which a UA must accept.
+  - CSS Sizing 3 and 4: `stretch`, `contain`, `stretch()` and `calc-size()`
+    on `width`, `height`, their `min-`/`max-` and logical forms.
+  - CSS Values 5: the `size` keyword in `calc-size()`'s calculation.
+  - MathML Core: `display: math`, `block math`, `inline math`.
+  - CSS Shapes 1 on CSS Images 4's `<radial-size>`: `circle(50%)`.
+  - CSS Color 5: relative colors (`rgb(from red r g b)`, and likewise
+    `hsl()`, `hwb()`, `lab()`, `lch()`, `oklab()`, `oklch()`, `color()`)
+    and `alpha()`.
+- Keywords whose support a specification leaves to the UA are
+  `Unknown(OtherSpecification)`, not Invalid: SVG 1.1's `writing-mode`
+  values (`tb-rl`, `lr-tb`, …, optional for non-SVG UAs per CSS Writing
+  Modes 4) and `invert` in `outline-color` and `outline` (CSS UI 3). Such a
+  keyword now counts anywhere in the value, so a shorthand holding one is
+  Unknown too.
+
 ## [0.16.0] - 2026-10-22
 
 Serialization gains an XML-safe mode for an XHTML `<style>` element

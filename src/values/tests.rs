@@ -98,6 +98,9 @@ fn unknown_values_say_why() {
         ("width: ", Empty),
         ("display: oeb-page-head", OtherSpecification),
         ("display: OEB-PAGE-FOOT", OtherSpecification),
+        ("writing-mode: tb-rl", OtherSpecification),
+        ("outline-color: invert", OtherSpecification),
+        ("outline: thin dotted invert", OtherSpecification),
         ("display: -webkit-box", PrefixedValue),
         ("width: -moz-available", PrefixedValue),
         ("width: some-future-function(1px)", Unread),
@@ -107,6 +110,62 @@ fn unknown_values_say_why() {
     }
     // An `oeb-page-head` anywhere else is just an unknown keyword.
     assert_eq!(check("float: oeb-page-head"), ValueCheck::Invalid);
+}
+
+/// Values mdn-data's grammars lag behind, each against the specification
+/// that defines it (epubveri's InvalidValue review, 2026-10-22).
+#[test]
+fn grammars_follow_the_specifications() {
+    all(
+        ValueCheck::Valid,
+        &[
+            // CSS Text 3 §6.1, §6.4.
+            "text-align: justify-all",
+            "text-justify: distribute",
+            // CSS Images 3 §5.2.
+            "image-rendering: optimizeSpeed",
+            "image-rendering: optimizeQuality",
+            // CSS Sizing 3 and 4.
+            "width: stretch",
+            "max-inline-size: stretch",
+            "height: contain",
+            "min-width: stretch(50%)",
+            // CSS Values 5 §11.
+            "width: calc-size(auto, size)",
+            "height: calc-size(auto, round(up, size, 20px))",
+            "height: calc-size(fit-content, (size + 1em) * 2)",
+            "height: calc-size(any, 10px)",
+            // MathML Core §4.1.
+            "display: math",
+            "display: block math",
+            // CSS Shapes 1 §3.1 on CSS Images 4's <radial-size>.
+            "shape-outside: circle(50%)",
+            "shape-outside: circle(closest-side at 10% 20%)",
+            // CSS Color 5 §4.
+            "color: rgb(from red r g b)",
+            "color: rgb(from red calc(r * 0.5) g b / alpha)",
+            "color: hsl(from red h s calc(l + 10))",
+            "color: oklch(from red l c h / 0.5)",
+            "color: color(from red xyz x y z)",
+            "color: color(from red --profile c m y k)",
+            "color: alpha(from red / 0.5)",
+        ],
+    );
+    all(
+        ValueCheck::Invalid,
+        &[
+            "text-justify: inter-ideograph",
+            "min-width: none",
+            "max-width: auto",
+            "height: calc-size(any, size / 2)",
+            "height: calc-size(none, size)",
+            "display: math flex",
+            "shape-outside: circle(10px 20px)",
+            "color: rgb(from red h g b)",
+            "color: rgb(r g b)",
+            "color: color(from red srgb x y z)",
+        ],
+    );
 }
 
 #[test]

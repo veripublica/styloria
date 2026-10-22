@@ -22,14 +22,19 @@
 //! - a value using `var()`, `env()`, `attr()`, `if()` or `inherit()`, whose
 //!   meaning is known only when it is computed;
 //! - a value holding a bad-url or bad-string token, already a syntax error;
-//! - an empty value;
-//! - a keyword another specification defines for the property
-//!   (`display: oeb-page-head`, EPUB 2).
+//! - an empty value.
 //!
-//! After matching, a failed value with a vendor-prefixed keyword or function
-//! in it is Unknown too: engines accept their own. A custom property (`--*`)
-//! takes any value, and the CSS-wide keywords (`inherit`, `initial`,
-//! `unset`, `revert`, `revert-layer`) fit every property.
+//! After matching, a failed value is Unknown too when it holds
+//!
+//! - a keyword whose support is up to the UA: one another specification
+//!   defines for the property (`display: oeb-page-head`, EPUB 2), or one a
+//!   CSS specification leaves optional (`writing-mode: tb-rl`, SVG 1.1's;
+//!   `outline-color: invert`);
+//! - a vendor-prefixed keyword or function: engines accept their own.
+//!
+//! A custom property (`--*`) takes any value, and the CSS-wide keywords
+//! (`inherit`, `initial`, `unset`, `revert`, `revert-layer`) fit every
+//! property.
 //!
 //! What remains possible is a keyword or function newer than the grammars:
 //! mdn-data's version is there so such a case can be traced.
@@ -117,7 +122,9 @@ pub enum UnknownValue {
     Substitution,
     /// The value holds a bad-url or bad-string token.
     BadToken,
-    /// A keyword another specification defines for this property.
+    /// It fits no grammar, but holds a keyword whose support is up to the
+    /// UA: another specification defines it for this property, or a CSS
+    /// specification leaves it optional.
     OtherSpecification,
     /// It fits no grammar, but holds a vendor-prefixed keyword or function.
     PrefixedValue,
@@ -388,18 +395,10 @@ fn uncached(property: &str, items: &[&ComponentValue<'_>]) -> ValueCheck {
     if let Some(reason) = unknown_before_matching(items, MAX_VALUE_DEPTH) {
         return ValueCheck::Unknown(reason);
     }
-    if let (1, ComponentValue::Token(Token::Ident(word))) = (items.len(), first) {
-        if CSS_WIDE.iter().any(|k| word.eq_ignore_ascii_case(k)) {
-            return ValueCheck::Valid;
-        }
-        let defined = UNKNOWN_KEYWORDS
-            .iter()
-            .filter(|(p, _)| *p == property)
-            .flat_map(|(_, k)| k.iter())
-            .any(|k| word.eq_ignore_ascii_case(k));
-        if defined {
-            return ValueCheck::Unknown(UnknownValue::OtherSpecification);
-        }
+    if let (1, ComponentValue::Token(Token::Ident(word))) = (items.len(), first)
+        && CSS_WIDE.iter().any(|k| word.eq_ignore_ascii_case(k))
+    {
+        return ValueCheck::Valid;
     }
     let g = grammars();
     let Some(Some(node)) = g.properties.get(property) else {
@@ -421,6 +420,8 @@ fn uncached(property: &str, items: &[&ComponentValue<'_>]) -> ValueCheck {
     }
     if fits {
         ValueCheck::Unknown(UnknownValue::Unread)
+    } else if has_optional_keyword(property, items) {
+        ValueCheck::Unknown(UnknownValue::OtherSpecification)
     } else if has_prefixed(items, MAX_VALUE_DEPTH) {
         ValueCheck::Unknown(UnknownValue::PrefixedValue)
     } else {
@@ -475,6 +476,18 @@ fn unknown_before_matching(items: &[&ComponentValue<'_>], depth: usize) -> Optio
         }
     }
     None
+}
+
+/// Whether a keyword whose support is up to the UA for `property` stands
+/// among `items` (not inside functions or blocks).
+fn has_optional_keyword(property: &str, items: &[&ComponentValue<'_>]) -> bool {
+    let Some((_, keywords)) = UNKNOWN_KEYWORDS.iter().find(|(p, _)| *p == property) else {
+        return false;
+    };
+    items.iter().any(|v| {
+        matches!(v, ComponentValue::Token(Token::Ident(w))
+            if keywords.iter().any(|k| w.eq_ignore_ascii_case(k)))
+    })
 }
 
 fn has_prefixed(items: &[&ComponentValue<'_>], depth: usize) -> bool {
