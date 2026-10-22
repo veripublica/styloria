@@ -19,9 +19,14 @@
 //! **Descriptor at-rules** are checked too, each against its own vocabulary:
 //! `@font-face`, `@counter-style`, `@property`, `@font-palette-values`,
 //! `@view-transition`. `@page` is special — it mixes its page descriptors with
-//! ordinary properties, so it is checked against the union of both. An
-//! at-rule this crate has no vocabulary for (`@font-feature-values`, an
-//! unknown or newer one) is left alone, and so is everything inside it.
+//! ordinary properties, so it is checked against the union of both. A known
+//! at-rule this crate has no vocabulary for (`@font-feature-values`) is left
+//! alone, and so is everything inside it.
+//!
+//! **At-rules.** One no specification defines is an
+//! [`UnknownAtRule`](DiagnosticKind::UnknownAtRule), and its body is left
+//! alone. An `@import` or `@namespace` out of the order CSS Cascade and CSS
+//! Namespaces require is a [`MisplacedAtRule`](DiagnosticKind::MisplacedAtRule).
 //!
 //! For the contents of an inline `style="…"` attribute use
 //! [`validate_declaration_list`], which checks against the property
@@ -37,6 +42,7 @@
 //! name is safe; flagging a real one is not.** So every exemption below errs
 //! toward silence.
 
+use crate::at_rule::{Placement, is_known_at_rule, placements};
 use crate::descriptors::descriptors_for;
 use crate::known_properties::is_known_property;
 use crate::parser::{self, BlockItem, Rule, Stylesheet};
@@ -68,6 +74,17 @@ pub enum DiagnosticKind {
     /// exactly (without `!important`), so slicing the source with it gives
     /// the value as written; `name` is the property or descriptor.
     InvalidValue,
+    /// An at-rule no CSS specification defines, so a browser ignores it and
+    /// everything in its block: `@medai`, `@fontface`. Vendor-prefixed names
+    /// (`@-moz-document`) are not reported. The span is the at-keyword;
+    /// `name` is the name without the `@`.
+    UnknownAtRule,
+    /// An `@import` after any other valid rule but `@charset` and `@layer`
+    /// statements (CSS Cascade 5), or an `@namespace` after one other than
+    /// `@import` (CSS Namespaces), or either inside a block. A browser
+    /// ignores it. Rules a browser drops (unknown at-rules, style rules with
+    /// an invalid selector) do not count. The span is the at-keyword.
+    MisplacedAtRule,
 }
 
 /// The vocabulary a declaration's name is checked against — which set of
@@ -96,8 +113,13 @@ pub fn validate_stylesheet(css: &str) -> Vec<Diagnostic> {
 /// [`validate_stylesheet`] over a tree that is already parsed.
 pub fn validate_parsed_stylesheet(sheet: &Stylesheet<'_>) -> Vec<Diagnostic> {
     let mut out = Vec::new();
-    for rule in &sheet.rules {
-        check_rule(rule, &mut out);
+    for (rule, place) in sheet.rules.iter().zip(placements(sheet)) {
+        if place == Placement::Misplaced
+            && let Rule::At(at) = &rule.node
+        {
+            report_at_rule(at, DiagnosticKind::MisplacedAtRule, &mut out);
+        }
+        check_rule(rule, false, &mut out);
     }
     out
 }
@@ -116,10 +138,27 @@ pub fn validate_parsed_block(items: &[BlockItem<'_>]) -> Vec<Diagnostic> {
     out
 }
 
-fn check_rule(rule: &Spanned<Rule<'_>>, out: &mut Vec<Diagnostic>) {
+fn report_at_rule(at: &parser::AtRule<'_>, kind: DiagnosticKind, out: &mut Vec<Diagnostic>) {
+    out.push(Diagnostic {
+        span: at.name_span,
+        kind,
+        name: at.name.to_string(),
+    });
+}
+
+fn check_rule(rule: &Spanned<Rule<'_>>, nested: bool, out: &mut Vec<Diagnostic>) {
     match &rule.node {
         Rule::Qualified(q) => check_items(&q.block.node, &Vocab::Property, out),
         Rule::At(at) => {
+            // A vendor-prefixed name is exempt, as for properties.
+            if !at.name.starts_with('-') && !is_known_at_rule(&at.name) {
+                report_at_rule(at, DiagnosticKind::UnknownAtRule, out);
+                return;
+            }
+            let is = |n: &str| at.name.eq_ignore_ascii_case(n);
+            if nested && (is("import") || is("namespace")) {
+                report_at_rule(at, DiagnosticKind::MisplacedAtRule, out);
+            }
             let Some(block) = &at.block else { return };
             let bare = parser::unprefixed(&at.name).to_ascii_lowercase();
             if let Some((at_rule, names)) = descriptors_for(&bare) {
@@ -147,7 +186,7 @@ fn check_items(items: &[BlockItem<'_>], vocab: &Vocab, out: &mut Vec<Diagnostic>
                 check_name(&d.node.name, d.node.name_span, vocab, out);
                 check_value(&d.node, vocab, out);
             }
-            BlockItem::Rule(r) => check_rule(r, out),
+            BlockItem::Rule(r) => check_rule(r, true, out),
         }
     }
 }
@@ -391,9 +430,78 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_at_rule_is_left_alone() {
-        assert!(validate_stylesheet("@future { colr: red; p { bogus: 1 } }").is_empty());
+    fn an_unknown_at_rule_is_reported_and_its_body_left_alone() {
+        let css = "@future { colr: red; p { bogus: 1 } }";
+        let d = validate_stylesheet(css);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].kind, DiagnosticKind::UnknownAtRule);
+        assert_eq!(
+            (d[0].span.slice(css), d[0].name.as_str()),
+            ("@future", "future")
+        );
+        // Known at-rules without a vocabulary here are still left alone.
         assert!(validate_stylesheet("@font-feature-values X { @swash { fancy: 1 } }").is_empty());
+    }
+
+    fn kinds(css: &str) -> Vec<(DiagnosticKind, String)> {
+        validate_stylesheet(css)
+            .into_iter()
+            .map(|d| (d.kind, d.name))
+            .collect()
+    }
+
+    #[test]
+    fn unknown_at_rules() {
+        use DiagnosticKind::UnknownAtRule as U;
+        assert_eq!(
+            kinds("@medai screen { p { color: red } }"),
+            [(U, "medai".into())]
+        );
+        assert_eq!(
+            kinds("@media screen { @fontface { src: x } }"),
+            [(U, "fontface".into())]
+        );
+        assert_eq!(kinds("@MEDIA print { } @Font-Face { src: url(a) }"), []);
+        // Vendor-prefixed names never; known nested ones in their place.
+        assert_eq!(
+            kinds("@-moz-document url(x) { } @-webkit-keyframes k { }"),
+            []
+        );
+        assert_eq!(kinds("@page { @top-center { content: \"x\" } }"), []);
+        assert_eq!(
+            kinds("@charset \"utf-8\"; @viewport { width: device-width }"),
+            []
+        );
+    }
+
+    #[test]
+    fn misplaced_imports_and_namespaces() {
+        use DiagnosticKind::MisplacedAtRule as M;
+        let m = |n: &str| (M, n.to_string());
+        // In order: @charset, @layer statements, @import, @namespace.
+        assert_eq!(
+            kinds(
+                "@charset \"x\"; @layer a; @import \"a.css\"; @layer b; @import \"b.css\"; @namespace svg \"u\"; @namespace \"d\"; p { }"
+            ),
+            []
+        );
+        assert_eq!(kinds("p { } @import \"a.css\";"), [m("import")]);
+        assert_eq!(kinds("@namespace \"u\"; @import \"a.css\";"), [m("import")]);
+        assert_eq!(kinds("@font-face { } @namespace \"u\";"), [m("namespace")]);
+        assert_eq!(kinds("@media print { @import \"a.css\"; }"), [m("import")]);
+        assert_eq!(kinds("p { @namespace \"u\"; }"), [m("namespace")]);
+        // A rule a browser drops does not count.
+        assert_eq!(kinds(". bad { } @import \"a.css\";"), []);
+        assert_eq!(
+            kinds("@unknown; @import \"a.css\";"),
+            [(DiagnosticKind::UnknownAtRule, "unknown".into())]
+        );
+        assert_eq!(kinds("@namespace 5; @import \"a.css\";"), []);
+        // A misplaced @import does not move the order either.
+        assert_eq!(
+            kinds("p { } @import \"a.css\"; @import \"b.css\";"),
+            [m("import"), m("import")]
+        );
     }
 
     #[test]

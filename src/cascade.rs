@@ -88,8 +88,8 @@
 //! modelled.
 
 use crate::at_rule::{
-    ImportLayer, ImportRule, LayerName, LayerRule, parse_import_rule, parse_layer_rule,
-    parse_media_query_list,
+    ImportLayer, ImportRule, LayerName, LayerRule, Placement, parse_import_rule, parse_layer_rule,
+    parse_media_query_list, placements,
 };
 use crate::matching::{Element, Match, Namespaces};
 use crate::parser::{self, AtRule, BlockItem, ComponentValue, Declaration, Rule, Stylesheet};
@@ -659,23 +659,15 @@ impl<'s, 'a> Builder<'_, 's, 'a> {
         };
         self.namespaces.push(Namespaces::from_stylesheet(sheet));
         self.importing.push(sheet);
-        // `@import` counts only before every other rule but `@charset` and
-        // `@layer` statements; a browser ignores a later one.
-        let mut imports_allowed = true;
-        for rule in &sheet.rules {
-            if let Rule::At(at) = &rule.node {
-                let is = |n: &str| at.name.eq_ignore_ascii_case(n);
-                if is("import") {
-                    if imports_allowed {
-                        self.import(sheet, at, &ctx);
-                    }
-                    continue;
+        // A misplaced `@import` or `@namespace` is ignored, as a browser does.
+        for (rule, place) in sheet.rules.iter().zip(placements(sheet)) {
+            if let Rule::At(at) = &rule.node
+                && at.name.eq_ignore_ascii_case("import")
+            {
+                if place == Placement::InOrder {
+                    self.import(sheet, at, &ctx);
                 }
-                if !(is("charset") || (is("layer") && at.block.is_none())) {
-                    imports_allowed = false;
-                }
-            } else {
-                imports_allowed = false;
+                continue;
             }
             self.rule(rule, &ctx);
         }
@@ -1357,7 +1349,7 @@ mod tests {
     #[test]
     fn imports_take_the_place_of_the_import_rule() {
         let main = leak(
-            "@charset \"utf-8\"; @layer base;\
+            "@charset \"utf-8\"; @layer base; @unknown-rule; . bad { }\
              @import \"b.css\" layer(x);\
              @import url(print.css) print;\
              @import \"self.css\";\
@@ -1384,6 +1376,7 @@ mod tests {
                 }
             },
         );
+        // Rules a browser drops do not end the imports: `b.css` counts.
         // Unlayered beats the imported sheet's layer `x`.
         assert_eq!(ask(&c, IMG, None, "width").1, "width: 1px");
         assert_eq!(ask(&c, IMG, None, "height").0, Match::Yes);

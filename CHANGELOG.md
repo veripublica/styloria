@@ -32,6 +32,21 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   the argument is dropped, as for any error there. `SyntaxErrorKind` gains
   a variant, which breaks an exhaustive `match` on it.
 
+- **Unknown and misplaced at-rules are reported**:
+  `DiagnosticKind::UnknownAtRule` for an at-rule no specification defines
+  (`@medai`, `@fontface`; vendor-prefixed names exempt), and
+  `DiagnosticKind::MisplacedAtRule` for an `@import` after another valid
+  rule, an `@namespace` after one other than `@import`, or either inside a
+  block. A browser ignores both. `DiagnosticKind` gains two variants.
+
+### Changed
+
+- **Rules a browser drops no longer end the `@import` section.** CSS
+  Cascade 5 requires `@import` to precede every other *valid* rule, so an
+  unknown at-rule or a style rule with an invalid selector before it no
+  longer keeps it out of the cascade. The same holds for `@namespace` and
+  the namespaces a selector resolves against.
+
 ### Fixed
 
 - **The serializer kept tokens apart only by luck.** Comments are not

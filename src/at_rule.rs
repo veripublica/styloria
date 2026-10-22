@@ -211,22 +211,149 @@ impl<'a> Namespaces<'a> {
     /// Namespaces §2). A browser ignores one written later, and so does this.
     pub fn from_stylesheet(sheet: &Stylesheet<'a>) -> Namespaces<'a> {
         let mut ns = Namespaces::default();
-        for rule in &sheet.rules {
-            let Rule::At(at) = &rule.node else { break };
-            let is = |n: &str| at.name.eq_ignore_ascii_case(n);
-            if is("namespace") {
-                if let Some(decl) = parse_namespace_rule(&at.prelude) {
-                    match decl.prefix {
-                        Some(p) => ns.prefixes.push((p, decl.uri)),
-                        None => ns.default = Some(decl.uri),
-                    }
+        for (rule, place) in sheet.rules.iter().zip(placements(sheet)) {
+            if place != Placement::InOrder {
+                continue;
+            }
+            let Rule::At(at) = &rule.node else { continue };
+            if at.name.eq_ignore_ascii_case("namespace")
+                && let Some(decl) = parse_namespace_rule(&at.prelude)
+            {
+                match decl.prefix {
+                    Some(p) => ns.prefixes.push((p, decl.uri)),
+                    None => ns.default = Some(decl.uri),
                 }
-            } else if !(is("charset") || is("import") || (is("layer") && at.block.is_none())) {
-                break;
             }
         }
         ns
     }
+}
+
+/// At-rule names the CSS specifications define, without the `@`: MDN's
+/// `at-rules.json` (mdn-data 2.37.2) and the at-rules the specs' drafts add,
+/// including the ones only valid inside another (`@page`'s margin rules,
+/// `@font-feature-values`' feature blocks). Lowercase, sorted. Over-inclusion
+/// only misses a report; omission makes one up.
+const KNOWN_AT_RULES: &[&str] = &[
+    "annotation",    // CSS Fonts 4, in @font-feature-values
+    "apply",         // CSS Mixins ED
+    "bottom-center", // CSS Paged Media 3 margin rules, in @page
+    "bottom-left",
+    "bottom-left-corner",
+    "bottom-right",
+    "bottom-right-corner",
+    "character-variant", // CSS Fonts 4, in @font-feature-values
+    "charset",
+    "color-profile", // CSS Color 5
+    "container",
+    "contents", // CSS Mixins ED
+    "counter-style",
+    "custom-media", // Media Queries 5
+    "document",     // CSS Conditional 3 (dropped draft), in MDN
+    "else",         // CSS Conditional 5
+    "font-face",
+    "font-feature-values",
+    "font-palette-values",
+    "function",         // CSS Functions and Mixins ED
+    "historical-forms", // CSS Fonts 4, in @font-feature-values
+    "import",
+    "keyframes",
+    "layer",
+    "left-bottom", // CSS Paged Media 3 margin rules, in @page
+    "left-middle",
+    "left-top",
+    "media",
+    "mixin", // CSS Mixins ED
+    "namespace",
+    "nest",      // CSS Nesting (earlier drafts)
+    "ornaments", // CSS Fonts 4, in @font-feature-values
+    "page",
+    "position-try",
+    "property",
+    "result",       // CSS Mixins ED
+    "right-bottom", // CSS Paged Media 3 margin rules, in @page
+    "right-middle",
+    "right-top",
+    "route", // proposal (route matching)
+    "scope",
+    "starting-style",
+    "styleset", // CSS Fonts 4, in @font-feature-values
+    "stylistic",
+    "supports",
+    "supports-condition", // proposal (named conditions)
+    "swash",
+    "top-center", // CSS Paged Media 3 margin rules, in @page
+    "top-left",
+    "top-left-corner",
+    "top-right",
+    "top-right-corner",
+    "view-transition",
+    "viewport", // CSS Device Adaptation (retired), in old books
+    "when",     // CSS Conditional 5
+];
+
+/// Whether some CSS specification defines an at-rule of this name. A
+/// vendor-prefixed name counts when its unprefixed name does
+/// (`@-webkit-keyframes`); one whose unprefixed name is unknown does not.
+pub(crate) fn is_known_at_rule(name: &str) -> bool {
+    let bare = crate::parser::unprefixed(name).to_ascii_lowercase();
+    KNOWN_AT_RULES.binary_search(&bare.as_str()).is_ok()
+}
+
+/// Where a top-level rule stands in the order a stylesheet must keep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Placement {
+    /// Where it may be: any rule but a misplaced `@import` or `@namespace`.
+    InOrder,
+    /// An `@import` after another valid rule, or an `@namespace` after one
+    /// other than `@import`: a browser ignores it.
+    Misplaced,
+}
+
+/// Each top-level rule's [`Placement`]. `@import` must precede every other
+/// valid rule (CSS Cascade 5, "Importing Style Sheets"), and `@namespace`
+/// every one but `@import` (CSS Namespaces, "Declaring namespaces").
+/// `@charset` and `@layer` statements may stand anywhere among them. A rule a browser drops
+/// does not count: an unknown at-rule, a style rule whose selector is
+/// invalid, an `@import` or `@namespace` whose prelude is.
+pub(crate) fn placements(sheet: &Stylesheet<'_>) -> Vec<Placement> {
+    #[derive(PartialEq, PartialOrd)]
+    enum Phase {
+        Imports,
+        Namespaces,
+        Body,
+    }
+    let mut phase = Phase::Imports;
+    let mut out = Vec::with_capacity(sheet.rules.len());
+    for rule in &sheet.rules {
+        let mut place = Placement::InOrder;
+        match &rule.node {
+            Rule::At(at) => {
+                let is = |n: &str| at.name.eq_ignore_ascii_case(n);
+                if is("charset") || (is("layer") && at.block.is_none()) {
+                } else if is("import") {
+                    if phase > Phase::Imports {
+                        place = Placement::Misplaced;
+                    }
+                } else if is("namespace") {
+                    if phase > Phase::Namespaces {
+                        place = Placement::Misplaced;
+                    } else if parse_namespace_rule(&at.prelude).is_some() {
+                        phase = Phase::Namespaces;
+                    }
+                } else if is_known_at_rule(&at.name) {
+                    phase = Phase::Body;
+                }
+            }
+            Rule::Qualified(q) => {
+                if phase < Phase::Body && crate::selector::parse_selector_list(&q.prelude).is_ok() {
+                    phase = Phase::Body;
+                }
+            }
+        }
+        out.push(place);
+    }
+    out
 }
 
 fn media_query<'a>(part: &Values<'a>) -> Option<MediaQuery<'a>> {

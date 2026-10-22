@@ -33,7 +33,8 @@ assert_eq!(rule.span.start_line_col(css), (1, 1));
   encodes to the original bytes, so a tool can edit one rule and leave the
   rest untouched. UTF-8, UTF-16 and every single-byte encoding of the
   Encoding Standard; the others are an error, never a guess.
-- **Selectors** (`selector` module) are read into a tree with specificity,
+- **Selectors** (`selector` module) are read into a tree with specificity
+  (a pseudo-class or pseudo-element no specification defines is reported),
   and **matched** (`matching` module) against the caller's own document
   tree through a small `Element` trait. The answer is three-valued: `Yes`,
   `No`, or `Unknown` when it depends on something a static tree does not
@@ -45,7 +46,8 @@ assert_eq!(rule.span.start_line_col(css), (1, 1));
   settled (a rule inside `@media`, an Unknown selector) is `Unknown`, with
   the reason.
 - **Validation** (`validate` and `values` modules) reports unknown
-  properties and descriptors, and values that cannot fit their property's
+  properties, descriptors and at-rules, misplaced `@import` and
+  `@namespace` rules, and values that cannot fit their property's
   or descriptor's grammar (`color: 12px`, `@font-face { font-display: fast }`),
   each with the span to underline. The grammars
   are mdn-data's. It errs toward silence: a value is invalid only when even
