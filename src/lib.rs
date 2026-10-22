@@ -31,6 +31,7 @@ mod known_properties;
 pub mod matching;
 pub mod parser;
 pub mod properties;
+mod pseudos;
 pub mod references;
 pub mod selector;
 pub mod serialize;

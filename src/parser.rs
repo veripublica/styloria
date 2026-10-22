@@ -240,6 +240,19 @@ pub enum SyntaxErrorKind {
     /// A selector with both kinds reports the `InvalidSelector`, so each
     /// comma-separated selector still yields at most one error.
     InvalidSelectorStructure,
+    /// A style rule whose selector names a pseudo-class or pseudo-element no
+    /// CSS specification defines in that form: `:hovr`, `::befor`, `:hover()`,
+    /// a bare `:not`. Selectors Level 4 ("Invalid Selectors and Error
+    /// Handling") makes such a selector invalid,
+    /// so a browser drops the rule. Vendor-prefixed names (`:-webkit-…`,
+    /// `::-epub-…`) are not reported. Inside `:is()` and `:where()` the
+    /// argument is dropped instead, as for any error there. The span is the
+    /// `:name` or `::name(…)`.
+    ///
+    /// Ranked with [`InvalidSelectorStructure`](Self::InvalidSelectorStructure):
+    /// within one selector a token error wins, and otherwise the first of the
+    /// two in source order is reported.
+    UnknownPseudo,
     /// Block/function nesting past [`MAX_NESTING_DEPTH`]. The contents below
     /// that point are discarded rather than parsed, so this is reported
     /// once, at the outermost bracket that was refused.

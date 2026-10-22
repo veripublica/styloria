@@ -36,17 +36,22 @@
 //! The reading is *syntactic*. It does not care whether `dvi` is a real
 //! element name, or whether `[hrefff]` is a real attribute.
 //!
-//! **Deliberately permissive, in two named places.** Reporting a valid
-//! selector as broken is far worse than missing a broken one — a false
-//! positive lands on somebody's real book — so:
+//! **Unknown pseudos** are a third kind,
+//! [`SyntaxErrorKind::UnknownPseudo`]: `:hovr`, `::befor`, `:hover()`. A
+//! selector holding a pseudo-class or pseudo-element that no CSS
+//! specification defines in that form is invalid (Selectors Level 4,
+//! "Invalid Selectors and Error Handling"), and a browser drops the rule.
+//! The names come from MDN's data and the specs' Editor's Drafts
+//! (`src/pseudos.rs`), and vendor-prefixed ones are never reported, since
+//! a false report lands on somebody's real stylesheet.
 //!
-//! 1. **Pseudo-classes and pseudo-elements this code does not know are
-//!    accepted**, with or without arguments: `::part()`, `:hover`, a vendor
-//!    name, a name nobody has invented yet. They come back as
-//!    [`PseudoClass::Other`] and [`PseudoElement`] with their arguments
-//!    unread. Only the ones whose grammar is fixed — `:not()`, `:is()`,
-//!    `:where()`, `:has()` and the `:nth-*()` family — have their arguments
-//!    read and checked.
+//! **Deliberately permissive, in two named places:**
+//!
+//! 1. **Pseudo arguments are not read**, except where the grammar is fixed:
+//!    `:not()`, `:is()`, `:where()`, `:has()` and the `:nth-*()` family.
+//!    Any other pseudo, `::part()` or `:lang()` say, comes back as
+//!    [`PseudoClass::Other`] or [`PseudoElement`] with its arguments as
+//!    written.
 //! 2. **`:is()` and `:where()` are forgiving**, as the spec says: an argument
 //!    that is not a selector is dropped, not reported, and the count of
 //!    dropped arguments is kept so a matcher can answer "unknown" rather than
@@ -55,6 +60,9 @@
 use std::borrow::Cow;
 
 use crate::parser::{BlockKind, ComponentValue, SyntaxError, SyntaxErrorKind};
+use crate::pseudos::{
+    PSEUDO_CLASS_FUNCTIONS, PSEUDO_CLASSES, PSEUDO_ELEMENT_FUNCTIONS, PSEUDO_ELEMENTS,
+};
 use crate::span::{Span, Spanned};
 use crate::token::{NumericType, Token};
 
@@ -702,8 +710,8 @@ fn list<'a>(
         &mut errors,
         |part, errors| match complex_with_structure(part, relative, depth) {
             Ok((c, None)) => selectors.push(c),
-            Ok((c, Some(span))) => {
-                errors.push(structure_error(span));
+            Ok((c, Some(e))) => {
+                errors.push(e);
                 if keep_flawed {
                     selectors.push(c);
                 }
@@ -742,7 +750,7 @@ fn argument_list<'a>(
     relative: bool,
     function: Span,
     depth: usize,
-    structure: &mut Option<Span>,
+    structure: &mut Option<SyntaxError>,
 ) -> Result<SelectorList<'a>, SyntaxError> {
     let (list, errors) = list(values, relative, depth, false);
     let earliest = |kind| {
@@ -755,8 +763,12 @@ fn argument_list<'a>(
     if let Some(e) = earliest(SyntaxErrorKind::InvalidSelector) {
         return Err(e);
     }
-    if let Some(e) = earliest(SyntaxErrorKind::InvalidSelectorStructure) {
-        note(structure, e.span);
+    if let Some(e) = errors
+        .iter()
+        .filter(|e| e.kind != SyntaxErrorKind::InvalidSelector)
+        .min_by_key(|e| e.span.start)
+    {
+        note_error(structure, *e);
     } else if list.selectors.is_empty() {
         note(structure, function);
     }
@@ -813,7 +825,7 @@ fn complex<'a>(
 ) -> Result<Spanned<ComplexSelector<'a>>, SyntaxError> {
     match complex_with_structure(part, relative, depth)? {
         (c, None) => Ok(c),
-        (_, Some(span)) => Err(structure_error(span)),
+        (_, Some(e)) => Err(e),
     }
 }
 
@@ -823,7 +835,7 @@ fn complex_with_structure<'a>(
     part: &Values<'a>,
     relative: bool,
     depth: usize,
-) -> Result<(Spanned<ComplexSelector<'a>>, Option<Span>), SyntaxError> {
+) -> Result<(Spanned<ComplexSelector<'a>>, Option<SyntaxError>), SyntaxError> {
     // The first structure error, if any; reading goes on past it.
     let mut structure = None;
     let mut i = skip_ws(part, 0);
@@ -898,7 +910,7 @@ fn compound<'a>(
     part: &Values<'a>,
     start: usize,
     depth: usize,
-    structure: &mut Option<Span>,
+    structure: &mut Option<SyntaxError>,
 ) -> Result<(Spanned<CompoundSelector<'a>>, usize), SyntaxError> {
     let mut simples: Vec<Spanned<SimpleSelector<'a>>> = Vec::new();
     let mut after_pseudo_element = false;
@@ -935,7 +947,7 @@ fn simple<'a>(
     part: &Values<'a>,
     i: usize,
     depth: usize,
-    structure: &mut Option<Span>,
+    structure: &mut Option<SyntaxError>,
 ) -> Result<(Spanned<SimpleSelector<'a>>, usize), SyntaxError> {
     let cv = &part[i];
     let one = |s| Ok((Spanned::new(s, cv.span), 1));
@@ -1023,7 +1035,7 @@ fn pseudo<'a>(
     part: &Values<'a>,
     i: usize,
     depth: usize,
-    structure: &mut Option<Span>,
+    structure: &mut Option<SyntaxError>,
 ) -> Result<(Spanned<SimpleSelector<'a>>, usize), SyntaxError> {
     let colon = part[i].span;
     let double = matches!(
@@ -1034,6 +1046,26 @@ fn pseudo<'a>(
     let Some(target) = part.get(i + n) else {
         return Err(bad(colon));
     };
+    let (name, function) = match &target.node {
+        ComponentValue::Token(Token::Ident(name)) => (name, false),
+        ComponentValue::Function { name, .. } => (name, true),
+        _ => return Err(bad(colon)),
+    };
+    // The four CSS 2 pseudo-elements also take one colon.
+    let legacy = !double
+        && !function
+        && ["before", "after", "first-line", "first-letter"]
+            .iter()
+            .any(|e| name.eq_ignore_ascii_case(e));
+    if !known_pseudo(name, double || legacy, function) {
+        note_error(
+            structure,
+            SyntaxError {
+                span: colon.to(target.span),
+                kind: SyntaxErrorKind::UnknownPseudo,
+            },
+        );
+    }
     let s = match (&target.node, double) {
         (ComponentValue::Token(Token::Ident(name)), true) => {
             SimpleSelector::PseudoElement(PseudoElement {
@@ -1096,7 +1128,7 @@ fn pseudo_class_function<'a>(
     args: &Values<'a>,
     span: Span,
     depth: usize,
-    structure: &mut Option<Span>,
+    structure: &mut Option<SyntaxError>,
 ) -> Result<PseudoClass<'a>, SyntaxError> {
     let is = |s: &str| name.eq_ignore_ascii_case(s);
     let inner = depth + 1;
@@ -1106,7 +1138,7 @@ fn pseudo_class_function<'a>(
     };
     // An `An+B` that does not parse is a structure error; the pseudo-class
     // is kept unread.
-    let nth = |values: &Values<'a>, structure: &mut Option<Span>| {
+    let nth = |values: &Values<'a>, structure: &mut Option<SyntaxError>| {
         let n = an_plus_b(values);
         if n.is_none() {
             note(structure, span);
@@ -1404,8 +1436,31 @@ fn structure_error(span: Span) -> SyntaxError {
 }
 
 /// Keep the first structure error a selector has.
-fn note(structure: &mut Option<Span>, span: Span) {
-    structure.get_or_insert(span);
+fn note(structure: &mut Option<SyntaxError>, span: Span) {
+    structure.get_or_insert(structure_error(span));
+}
+
+/// Keep the first error a selector has that is not a token error: a
+/// structure error or an unknown pseudo.
+fn note_error(structure: &mut Option<SyntaxError>, e: SyntaxError) {
+    structure.get_or_insert(e);
+}
+
+/// Whether a pseudo-class (`element` false) or pseudo-element is one the
+/// specs define in this form, plain or functional. A vendor-prefixed name
+/// (`:-webkit-autofill`, `::-epub-…`) is never reported.
+fn known_pseudo(name: &str, element: bool, function: bool) -> bool {
+    if name.starts_with('-') {
+        return true;
+    }
+    let table = match (element, function) {
+        (false, false) => PSEUDO_CLASSES,
+        (false, true) => PSEUDO_CLASS_FUNCTIONS,
+        (true, false) => PSEUDO_ELEMENTS,
+        (true, true) => PSEUDO_ELEMENT_FUNCTIONS,
+    };
+    let lower = name.to_ascii_lowercase();
+    table.binary_search(&lower.as_str()).is_ok()
 }
 
 fn is_delim(cv: Option<&Spanned<ComponentValue<'_>>>, c: char) -> bool {
@@ -1501,7 +1556,9 @@ mod tests {
             .filter(|k| {
                 matches!(
                     k,
-                    SyntaxErrorKind::InvalidSelector | SyntaxErrorKind::InvalidSelectorStructure
+                    SyntaxErrorKind::InvalidSelector
+                        | SyntaxErrorKind::InvalidSelectorStructure
+                        | SyntaxErrorKind::UnknownPseudo
                 )
             })
             .collect()
@@ -1800,8 +1857,9 @@ mod tests {
             "::part(label) { color: red }",
             "li:nth-child(2n+1 of .c) { color: red }",
             "input::-webkit-search-cancel-button { color: red }",
-            "p:future-pseudo-nobody-invented-yet { color: red }",
-            "p:future-function(1 2 3 ? !) { color: red }",
+            "p:-x-future-pseudo { color: red }",
+            "p:-x-future-function(1 2 3 ? !) { color: red }",
+            "p:lang(1 2 3 ? !) { color: red }",
             "& .c { color: red }",
             "&.c { color: red }",
             "&div { color: red }",
@@ -1867,6 +1925,84 @@ mod tests {
         ] {
             assert_eq!(kinds(&format!("{css} {{ color: red }}")), [kind], "{css}");
         }
+    }
+
+    #[test]
+    fn unknown_pseudos_are_reported() {
+        use SyntaxErrorKind::{
+            InvalidSelector as T, InvalidSelectorStructure as S, UnknownPseudo as U,
+        };
+        for (css, want, span) in [
+            ("a:hovr { color: red }", vec![U], Some(":hovr")),
+            ("p::befor { color: red }", vec![U], Some("::befor")),
+            ("a:hover() { color: red }", vec![U], Some(":hover()")),
+            ("p:not { color: red }", vec![U], Some(":not")),
+            ("p::part { color: red }", vec![U], Some("::part")),
+            ("p:selection { color: red }", vec![U], Some(":selection")),
+            ("p:first { color: red }", vec![U], Some(":first")),
+            ("p:matches(a) { color: red }", vec![U], Some(":matches(a)")),
+            (
+                "p:future-pseudo-nobody-invented-yet { color: red }",
+                vec![U],
+                Some(":future-pseudo-nobody-invented-yet"),
+            ),
+            ("a:not(:hovr) { color: red }", vec![U], Some(":hovr")),
+            ("a:has(> b:hovr) { color: red }", vec![U], Some(":hovr")),
+            ("p { &:hovr { color: red } }", vec![U], Some(":hovr")),
+            // Known, in any case, in either colon form for CSS 2's four.
+            (
+                "a:HOVER, p:Before, p::AFTER, p:first-letter { color: red }",
+                vec![],
+                None,
+            ),
+            (
+                "p::part(x), :host, :host(.a), ::slotted(b), :lang(tr) { color: red }",
+                vec![],
+                None,
+            ),
+            (
+                "p::marker, ::view-transition-old(*), :state(x), :heading(1) { color: red }",
+                vec![],
+                None,
+            ),
+            (
+                "p:blank, :nth-col(2), ::scroll-button(up), ::picker(select) { color: red }",
+                vec![],
+                None,
+            ),
+            // Vendor-prefixed names are never reported.
+            (
+                "p:-webkit-any(a), ::-moz-selection, :-epub-x, ::-webkit-scrollbar { color: red }",
+                vec![],
+                None,
+            ),
+            // Forgiving lists drop the argument, as for any error.
+            (
+                "a:is(:hovr, b), :where(::befor) { color: red }",
+                vec![],
+                None,
+            ),
+            // A token error still wins; otherwise the first in source order.
+            (":hovr . b { color: red }", vec![T], Some(".")),
+            ("#1a:hovr { color: red }", vec![S], Some("#1a")),
+            (":hovr#1a { color: red }", vec![U], Some(":hovr")),
+            // Each selector reports its own.
+            (
+                "a:hovr, b, c::befor { color: red }",
+                vec![U, U],
+                Some(":hovr"),
+            ),
+        ] {
+            assert_eq!(kinds(css), want, "{css}");
+            if let Some(span) = span {
+                assert_eq!(syntax_errors(css)[0].span.slice(css), span, "{css}");
+            }
+        }
+        // Not a selector: @page and keyframe selectors are not read.
+        assert_eq!(
+            kinds("@page :first { margin: 0 } @keyframes k { from { a: b } }"),
+            []
+        );
     }
 
     /// A selector with both kinds of error reports the token one: that is the

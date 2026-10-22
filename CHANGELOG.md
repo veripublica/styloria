@@ -22,6 +22,16 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   a `]]>` spelled by tokens, or a `<bad-url-token>` holding one of these
   characters.
 
+- **Unknown pseudo-classes and pseudo-elements are reported**, as
+  `SyntaxErrorKind::UnknownPseudo`: `:hovr`, `::befor`, `:hover()`, a bare
+  `:not`. Selectors Level 4 makes a selector holding a pseudo the UA does
+  not know invalid, and a browser drops the rule, so the cascade drops it
+  too. The names are MDN's `selectors.json` plus what the specs' Editor's
+  Drafts define and MDN does not list yet (`src/pseudos.rs`, generated).
+  Vendor-prefixed names are never reported. Inside `:is()` and `:where()`
+  the argument is dropped, as for any error there. `SyntaxErrorKind` gains
+  a variant, which breaks an exhaustive `match` on it.
+
 ### Fixed
 
 - **The serializer kept tokens apart only by luck.** Comments are not
