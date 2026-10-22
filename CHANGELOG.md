@@ -9,6 +9,18 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-10-22
+
+Serialization gains an XML-safe mode for an XHTML `<style>` element
+(`serialize_stylesheet_for_xml`), and the serializer no longer runs two
+comment-separated tokens together. Five spec checks are added: unknown
+pseudo-classes and pseudo-elements (a syntax error), and unknown and misplaced
+at-rules, unknown media features and `!important` inside keyframes (diagnostics).
+The cascade evaluates `@supports`
+and drops what no browser applies. This is a breaking release: `SyntaxErrorKind`
+gains one variant and `DiagnosticKind` four, so an exhaustive `match` on either
+must take them.
+
 ### Added
 
 - **XML-safe serialization**: `serialize_stylesheet_for_xml` writes a
