@@ -9,6 +9,12 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-10-22
+
+Value checking follows the specifications where mdn-data's grammars lag
+behind them, and keywords a specification leaves to the UA are Unknown rather
+than Invalid. No API change.
+
 ### Fixed
 
 - `check_value` no longer calls spec-valid values invalid where mdn-data's
