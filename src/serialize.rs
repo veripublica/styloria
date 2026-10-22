@@ -6,6 +6,10 @@
 //! (tokenization discards them), but escaping must always be correct — a
 //! serialized identifier/string/url must always re-tokenize to the same
 //! value it started from.
+//!
+//! One tree has no text: a nested rule whose prelude is only a name and a
+//! colon (`a:{…}` after junk made it fail as a declaration) reads back as a
+//! declaration. Its selector is invalid, so a browser drops it either way.
 
 use crate::parser::{
     BlockItem, BlockKind, ComponentValue, Declaration, Rule, SimpleBlock, Stylesheet,
@@ -239,227 +243,411 @@ impl Xml {
 
 type Written = Result<(), XmlSafeError>;
 
-/// Append one token. A function token writes its name and `(`.
-pub fn serialize_token(t: &Token, out: &mut String) {
-    let _ = write_token(t, Span::new(0, 0), out, None);
+/// The last token written, as far as the next one could run into it once
+/// the comments between them are gone.
+#[derive(Clone, Copy, PartialEq)]
+enum Prev {
+    Other,
+    Whitespace,
+    Ident,
+    /// An at-keyword, a hash or a dimension: a name the next token can
+    /// extend.
+    AtHashDimension,
+    Number,
+    /// A `#` or `-` delimiter.
+    HashOrMinus,
+    /// An `@` delimiter.
+    At,
+    /// A `.` or `+` delimiter.
+    DotOrPlus,
+    /// A `/` delimiter.
+    Slash,
+    /// A `<` delimiter.
+    Less,
+    UnicodeRange,
 }
 
-fn write_token(t: &Token, span: Span, out: &mut String, xml: Option<&Xml>) -> Written {
-    let refuse = |kind| Err(XmlSafeError { span, kind });
-    let x = xml.is_some();
+/// The token about to be written, in the same terms.
+#[derive(Clone, Copy, PartialEq)]
+enum Next {
+    Other,
+    Ident,
+    Function,
+    Url,
+    BadUrl,
+    Minus,
+    Number,
+    Percentage,
+    Dimension,
+    Cdc,
+    LeftParen,
+    Star,
+    Percent,
+    Question,
+    Bang,
+}
+
+/// Whether `prev` and `next` written side by side would read back as other
+/// tokens, so an empty comment has to go between them: the table in CSS
+/// Syntax's "Serialization", plus a number before `-` (`1` `-` `-x` would
+/// read as the dimension `1--x`), a `<` before `!` (a CDO), and a unicode
+/// range, which a number or name would extend.
+fn needs_comment(prev: Prev, next: Next) -> bool {
+    use Next::*;
+    let name_or_number = matches!(
+        next,
+        Ident | Function | Url | BadUrl | Minus | Number | Percentage | Dimension
+    );
+    match prev {
+        Prev::Ident => name_or_number || matches!(next, Cdc | LeftParen),
+        Prev::AtHashDimension => name_or_number || next == Cdc,
+        Prev::HashOrMinus => name_or_number,
+        Prev::Number => name_or_number || next == Percent,
+        Prev::At => matches!(next, Ident | Function | Url | BadUrl | Minus),
+        Prev::DotOrPlus => matches!(next, Number | Percentage | Dimension),
+        Prev::Slash => next == Star,
+        Prev::Less => next == Bang,
+        Prev::UnicodeRange => name_or_number || next == Question,
+        Prev::Other | Prev::Whitespace => false,
+    }
+}
+
+fn next_of(t: &Token) -> Next {
     match t {
-        Token::Ident(s) => serialize_name(s, out, true, x),
-        Token::Function(s) => {
-            serialize_name(s, out, true, x);
-            out.push('(');
+        Token::Ident(_) => Next::Ident,
+        Token::Function(_) => Next::Function,
+        Token::Url(_) => Next::Url,
+        Token::BadUrl(_) => Next::BadUrl,
+        Token::Number { .. } => Next::Number,
+        Token::Percentage { .. } => Next::Percentage,
+        Token::Dimension { .. } => Next::Dimension,
+        Token::Cdc => Next::Cdc,
+        Token::LeftParen => Next::LeftParen,
+        Token::Delim('-') => Next::Minus,
+        Token::Delim('*') => Next::Star,
+        Token::Delim('%') => Next::Percent,
+        Token::Delim('?') => Next::Question,
+        Token::Delim('!') => Next::Bang,
+        _ => Next::Other,
+    }
+}
+
+fn prev_of(t: &Token) -> Prev {
+    match t {
+        Token::Ident(_) => Prev::Ident,
+        Token::AtKeyword(_) | Token::Hash { .. } | Token::Dimension { .. } => Prev::AtHashDimension,
+        Token::Number { .. } => Prev::Number,
+        Token::Delim('#' | '-') => Prev::HashOrMinus,
+        Token::Delim('@') => Prev::At,
+        Token::Delim('.' | '+') => Prev::DotOrPlus,
+        Token::Delim('/') => Prev::Slash,
+        Token::Delim('<') => Prev::Less,
+        Token::UnicodeRange { .. } => Prev::UnicodeRange,
+        Token::Whitespace => Prev::Whitespace,
+        _ => Prev::Other,
+    }
+}
+
+/// Writes the tree, keeping track of the last token so that two tokens a
+/// comment kept apart are not run together.
+struct Writer<'x> {
+    out: String,
+    xml: Option<&'x Xml>,
+    prev: Prev,
+}
+
+impl Writer<'_> {
+    fn plain(out: &mut String) -> Writer<'static> {
+        Writer {
+            out: std::mem::take(out),
+            xml: None,
+            prev: Prev::Other,
         }
-        Token::AtKeyword(s) => {
-            out.push('@');
-            serialize_name(s, out, true, x);
+    }
+
+    /// Start a token of kind `next`, separating it from the last one if
+    /// they would run together.
+    fn start(&mut self, next: Next) {
+        if needs_comment(self.prev, next) {
+            self.out.push_str("/**/");
         }
-        Token::Hash { value, is_id } => {
-            out.push('#');
-            serialize_name(value, out, *is_id, x);
+    }
+
+    /// Punctuation: nothing runs into it, and it runs into nothing.
+    fn punct(&mut self, s: &str) {
+        self.out.push_str(s);
+        self.prev = Prev::Other;
+    }
+
+    fn name(&mut self, s: &str, check_leading_digit: bool) {
+        serialize_name(s, &mut self.out, check_leading_digit, self.xml.is_some());
+    }
+
+    fn token(&mut self, t: &Token, span: Span) -> Written {
+        let refuse = |kind| Err(XmlSafeError { span, kind });
+        let x = self.xml.is_some();
+        // Two whitespace tokens (a comment once stood between them) are
+        // written as one space, as they read back.
+        if *t == Token::Whitespace && self.prev == Prev::Whitespace {
+            return Ok(());
         }
-        Token::String(s) => {
-            let mode = match xml {
-                None => Mode::Css,
-                Some(xml) if xml.is_url(span) => Mode::XmlUrl,
-                Some(_) => Mode::Xml,
-            };
-            if write_string(s, out, mode).is_err() {
-                return refuse(XmlSafeErrorKind::Url);
+        match t {
+            Token::Delim(c @ ('<' | '&')) if x => {
+                return refuse(XmlSafeErrorKind::Delimiter(*c));
             }
-        }
-        // An unterminated string: a quote and the newline that ended it,
-        // which re-tokenizes as a bad string again rather than swallowing
-        // the text after it.
-        Token::BadString => out.push_str("\"\n"),
-        Token::Url(s) => {
-            let mode = if x { Mode::XmlUrl } else { Mode::Css };
-            if write_url(s, out, mode).is_err() {
-                return refuse(XmlSafeErrorKind::Url);
+            Token::Delim('>') if x && self.out.ends_with("]]") => {
+                return refuse(XmlSafeErrorKind::CdataEnd);
             }
+            Token::Delim(c) if x && xml_unsafe(*c, &self.out) => {
+                return refuse(XmlSafeErrorKind::Delimiter(*c));
+            }
+            Token::Cdo if x => return refuse(XmlSafeErrorKind::Cdo),
+            _ => {}
         }
-        Token::BadUrl(raw) => {
-            if x {
-                // Only the last two characters written can join a `]]>`.
-                let mut tail: Vec<char> = out.chars().rev().take(2).collect();
-                tail.reverse();
-                let mut probe: String = tail.into_iter().collect();
-                for c in raw.chars() {
-                    let xml_control = needs_control_escape(c) && !matches!(c, '\t' | '\n' | '\r');
-                    if xml_control || xml_unsafe(c, &probe) {
-                        return refuse(XmlSafeErrorKind::Url);
-                    }
-                    probe.push(c);
+        self.start(next_of(t));
+        let out = &mut self.out;
+        match t {
+            Token::Ident(s) => serialize_name(s, out, true, x),
+            Token::Function(s) => {
+                serialize_name(s, out, true, x);
+                out.push('(');
+            }
+            Token::AtKeyword(s) => {
+                out.push('@');
+                serialize_name(s, out, true, x);
+            }
+            Token::Hash { value, is_id } => {
+                out.push('#');
+                serialize_name(value, out, *is_id, x);
+            }
+            Token::String(s) => {
+                let mode = match self.xml {
+                    None => Mode::Css,
+                    Some(xml) if xml.is_url(span) => Mode::XmlUrl,
+                    Some(_) => Mode::Xml,
+                };
+                if write_string(s, out, mode).is_err() {
+                    return refuse(XmlSafeErrorKind::Url);
                 }
             }
-            out.push_str(raw);
-            if !raw.ends_with(')') {
-                out.push(')');
+            // An unterminated string: a quote and the newline that ended it,
+            // which re-tokenizes as a bad string again rather than swallowing
+            // the text after it.
+            Token::BadString => out.push_str("\"\n"),
+            Token::Url(s) => {
+                let mode = if x { Mode::XmlUrl } else { Mode::Css };
+                if write_url(s, out, mode).is_err() {
+                    return refuse(XmlSafeErrorKind::Url);
+                }
             }
-        }
-        Token::Delim('>') if x && out.ends_with("]]") => {
-            return refuse(XmlSafeErrorKind::CdataEnd);
-        }
-        Token::Delim(c) if x && xml_unsafe(*c, out) => {
-            return refuse(XmlSafeErrorKind::Delimiter(*c));
-        }
-        Token::Delim(c) => out.push(*c),
-        Token::Number { repr, .. } => out.push_str(repr),
-        Token::Percentage { repr, .. } => {
-            out.push_str(repr);
-            out.push('%');
-        }
-        Token::Dimension { repr, unit, .. } => {
-            out.push_str(repr);
-            serialize_dimension_unit(unit, out, x);
-        }
-        Token::UnicodeRange { start, end } => {
-            use std::fmt::Write;
-            let _ = write!(out, "U+{start:X}");
-            if end != start {
-                let _ = write!(out, "-{end:X}");
+            Token::BadUrl(raw) => {
+                if x {
+                    // Only the last two characters written can join a `]]>`.
+                    let mut tail: Vec<char> = out.chars().rev().take(2).collect();
+                    tail.reverse();
+                    let mut probe: String = tail.into_iter().collect();
+                    for c in raw.chars() {
+                        let xml_control =
+                            needs_control_escape(c) && !matches!(c, '\t' | '\n' | '\r');
+                        if xml_control || xml_unsafe(c, &probe) {
+                            return refuse(XmlSafeErrorKind::Url);
+                        }
+                        probe.push(c);
+                    }
+                }
+                out.push_str(raw);
+                if !raw.ends_with(')') {
+                    out.push(')');
+                }
             }
+            // A `\` is a delimiter only when a newline follows it, and
+            // anything else after it would read as an escape.
+            Token::Delim('\\') => out.push_str("\\\n"),
+            Token::Delim(c) => out.push(*c),
+            Token::Number { repr, .. } => out.push_str(repr),
+            Token::Percentage { repr, .. } => {
+                out.push_str(repr);
+                out.push('%');
+            }
+            Token::Dimension { repr, unit, .. } => {
+                out.push_str(repr);
+                serialize_dimension_unit(unit, out, x);
+            }
+            Token::UnicodeRange { start, end } => {
+                use std::fmt::Write;
+                let _ = write!(out, "U+{start:X}");
+                if end != start {
+                    let _ = write!(out, "-{end:X}");
+                }
+            }
+            Token::Whitespace => out.push(' '),
+            Token::Cdo => out.push_str("<!--"),
+            Token::Cdc => out.push_str("-->"),
+            Token::Colon => out.push(':'),
+            Token::Semicolon => out.push(';'),
+            Token::Comma => out.push(','),
+            Token::LeftSquare => out.push('['),
+            Token::RightSquare => out.push(']'),
+            Token::LeftParen => out.push('('),
+            Token::RightParen => out.push(')'),
+            Token::LeftCurly => out.push('{'),
+            Token::RightCurly => out.push('}'),
         }
-        Token::Whitespace => out.push(' '),
-        Token::Cdo if x => return refuse(XmlSafeErrorKind::Cdo),
-        Token::Cdo => out.push_str("<!--"),
-        Token::Cdc => out.push_str("-->"),
-        Token::Colon => out.push(':'),
-        Token::Semicolon => out.push(';'),
-        Token::Comma => out.push(','),
-        Token::LeftSquare => out.push('['),
-        Token::RightSquare => out.push(']'),
-        Token::LeftParen => out.push('('),
-        Token::RightParen => out.push(')'),
-        Token::LeftCurly => out.push('{'),
-        Token::RightCurly => out.push('}'),
+        self.prev = prev_of(t);
+        Ok(())
     }
-    Ok(())
+
+    fn component_value(&mut self, v: &ComponentValue, span: Span) -> Written {
+        match v {
+            ComponentValue::Token(t) => self.token(t, span),
+            ComponentValue::Function { name, args } => {
+                self.start(Next::Function);
+                self.name(name, true);
+                self.punct("(");
+                self.values(args)?;
+                self.punct(")");
+                Ok(())
+            }
+            ComponentValue::Block(b) => self.simple_block(b),
+        }
+    }
+
+    fn values(&mut self, values: &[Spanned<ComponentValue>]) -> Written {
+        for v in values {
+            self.component_value(&v.node, v.span)?;
+        }
+        Ok(())
+    }
+
+    fn simple_block(&mut self, b: &SimpleBlock) -> Written {
+        let (open, close) = match b.kind {
+            BlockKind::Curly => ("{", "}"),
+            BlockKind::Square => ("[", "]"),
+            BlockKind::Paren => {
+                self.start(Next::LeftParen);
+                ("(", ")")
+            }
+        };
+        self.punct(open);
+        self.values(&b.values)?;
+        self.punct(close);
+        Ok(())
+    }
+
+    fn declaration(&mut self, d: &Declaration) -> Written {
+        self.name(&d.name, true);
+        self.punct(":");
+        self.values(&d.value)?;
+        if d.important {
+            self.punct("!important");
+        }
+        Ok(())
+    }
+
+    fn items(&mut self, items: &[BlockItem]) -> Written {
+        for item in items {
+            match item {
+                BlockItem::Declaration(d) => {
+                    self.declaration(&d.node)?;
+                    self.punct(";");
+                }
+                BlockItem::Rule(r) => self.rule(&r.node)?,
+            }
+        }
+        Ok(())
+    }
+
+    fn rule(&mut self, r: &Rule) -> Written {
+        match r {
+            Rule::Qualified(q) => self.values(&q.prelude)?,
+            Rule::At(a) => {
+                self.out.push('@');
+                self.name(&a.name, true);
+                self.prev = Prev::AtHashDimension;
+                self.values(&a.prelude)?;
+            }
+        }
+        match r.block() {
+            Some(b) => {
+                self.punct("{");
+                self.items(&b.node)?;
+                self.punct("}");
+            }
+            None => self.punct(";"),
+        }
+        Ok(())
+    }
+
+    fn rules(&mut self, sheet: &Stylesheet) -> Written {
+        for r in &sheet.rules {
+            self.rule(&r.node)?;
+        }
+        Ok(())
+    }
+
+    /// The finished text. A U+FEFF at its very start would read back as a
+    /// byte-order mark and vanish, so a comment goes before it.
+    fn finish(mut self) -> String {
+        if self.out.starts_with('\u{FEFF}') {
+            self.out.insert_str(0, "/**/");
+        }
+        self.out
+    }
+}
+
+/// Append one token. A function token writes its name and `(`.
+pub fn serialize_token(t: &Token, out: &mut String) {
+    let mut w = Writer::plain(out);
+    let _ = w.token(t, Span::new(0, 0));
+    *out = w.out;
 }
 
 /// Append one component value: a token, a function with its arguments and
 /// `)`, or a simple block with its brackets.
 pub fn serialize_component_value(v: &ComponentValue, out: &mut String) {
-    let _ = write_component_value(v, Span::new(0, 0), out, None);
-}
-
-fn write_component_value(
-    v: &ComponentValue,
-    span: Span,
-    out: &mut String,
-    xml: Option<&Xml>,
-) -> Written {
-    match v {
-        ComponentValue::Token(t) => write_token(t, span, out, xml)?,
-        ComponentValue::Function { name, args } => {
-            serialize_name(name, out, true, xml.is_some());
-            out.push('(');
-            write_values(args, out, xml)?;
-            out.push(')');
-        }
-        ComponentValue::Block(b) => write_simple_block(b, out, xml)?,
-    }
-    Ok(())
+    let mut w = Writer::plain(out);
+    let _ = w.component_value(v, Span::new(0, 0));
+    *out = w.out;
 }
 
 /// A list of component values: a prelude, a declaration's value, a block's
 /// or function's contents.
 pub fn serialize_values(values: &[Spanned<ComponentValue>], out: &mut String) {
-    let _ = write_values(values, out, None);
-}
-
-fn write_values(
-    values: &[Spanned<ComponentValue>],
-    out: &mut String,
-    xml: Option<&Xml>,
-) -> Written {
-    for v in values {
-        write_component_value(&v.node, v.span, out, xml)?;
-    }
-    Ok(())
+    let mut w = Writer::plain(out);
+    let _ = w.values(values);
+    *out = w.out;
 }
 
 /// Append a `{ … }`, `[ … ]` or `( … )` block.
 pub fn serialize_simple_block(b: &SimpleBlock, out: &mut String) {
-    let _ = write_simple_block(b, out, None);
-}
-
-fn write_simple_block(b: &SimpleBlock, out: &mut String, xml: Option<&Xml>) -> Written {
-    let (open, close) = match b.kind {
-        BlockKind::Curly => ('{', '}'),
-        BlockKind::Square => ('[', ']'),
-        BlockKind::Paren => ('(', ')'),
-    };
-    out.push(open);
-    write_values(&b.values, out, xml)?;
-    out.push(close);
-    Ok(())
+    let mut w = Writer::plain(out);
+    let _ = w.simple_block(b);
+    *out = w.out;
 }
 
 /// Append `name:value`, with `!important` when set and no trailing `;`.
 pub fn serialize_declaration(d: &Declaration, out: &mut String) {
-    let _ = write_declaration(d, out, None);
-}
-
-fn write_declaration(d: &Declaration, out: &mut String, xml: Option<&Xml>) -> Written {
-    serialize_name(&d.name, out, true, xml.is_some());
-    out.push(':');
-    write_values(&d.value, out, xml)?;
-    if d.important {
-        out.push_str("!important");
-    }
-    Ok(())
-}
-
-fn write_items(items: &[BlockItem], out: &mut String, xml: Option<&Xml>) -> Written {
-    for item in items {
-        match item {
-            BlockItem::Declaration(d) => {
-                write_declaration(&d.node, out, xml)?;
-                out.push(';');
-            }
-            BlockItem::Rule(r) => write_rule(&r.node, out, xml)?,
-        }
-    }
-    Ok(())
+    let mut w = Writer::plain(out);
+    let _ = w.declaration(d);
+    *out = w.out;
 }
 
 /// Append a rule with its block, or with `;` for a statement at-rule.
 pub fn serialize_rule(r: &Rule, out: &mut String) {
-    let _ = write_rule(r, out, None);
+    let mut w = Writer::plain(out);
+    let _ = w.rule(r);
+    *out = w.out;
 }
 
-fn write_rule(r: &Rule, out: &mut String, xml: Option<&Xml>) -> Written {
-    match r {
-        Rule::Qualified(q) => write_values(&q.prelude, out, xml)?,
-        Rule::At(a) => {
-            out.push('@');
-            serialize_name(&a.name, out, true, xml.is_some());
-            write_values(&a.prelude, out, xml)?;
-        }
-    }
-    match r.block() {
-        Some(b) => {
-            out.push('{');
-            write_items(&b.node, out, xml)?;
-            out.push('}');
-        }
-        None => out.push(';'),
-    }
-    Ok(())
-}
-
-/// The whole stylesheet as equivalent CSS: comments and whitespace are not
-/// kept, so it reads back to the same rules and values, at other spans.
+/// The whole stylesheet as equivalent CSS: comments are not kept, and a run
+/// of whitespace is one space, so it reads back to the same rules and
+/// values, at other spans. Where two tokens would run together without the
+/// comment that separated them (`1px/**/2px`), an empty comment stays.
 pub fn serialize_stylesheet(sheet: &Stylesheet) -> String {
     let mut out = String::new();
-    for r in &sheet.rules {
-        let _ = write_rule(&r.node, &mut out, None);
-    }
-    out
+    let mut w = Writer::plain(&mut out);
+    let _ = w.rules(sheet);
+    w.finish()
 }
 
 /// The stylesheet as [`serialize_stylesheet`] writes it, but fit to stand as
@@ -477,19 +665,22 @@ pub fn serialize_stylesheet_for_xml(sheet: &Stylesheet) -> Result<String, XmlSaf
     let xml = Xml {
         urls: url_references(sheet).into_iter().map(|u| u.span).collect(),
     };
-    let mut out = String::new();
-    for r in &sheet.rules {
-        write_rule(&r.node, &mut out, Some(&xml))?;
-    }
-    Ok(out)
+    let mut w = Writer {
+        out: String::new(),
+        xml: Some(&xml),
+        prev: Prev::Other,
+    };
+    w.rules(sheet)?;
+    Ok(w.finish())
 }
 
 /// The contents of a block, as [`parse_block_contents`](crate::parse_block_contents)
 /// returns them — a `style="…"` attribute's value, say.
 pub fn serialize_block_contents(items: &[BlockItem]) -> String {
     let mut out = String::new();
-    let _ = write_items(items, &mut out, None);
-    out
+    let mut w = Writer::plain(&mut out);
+    let _ = w.items(items);
+    w.finish()
 }
 
 #[cfg(test)]
@@ -601,6 +792,49 @@ mod tests {
         );
     }
 
+    /// Tokens a comment kept apart stay apart: the output reads back to the
+    /// same tokens as the input, comments and whitespace runs aside.
+    #[test]
+    fn tokens_a_comment_separated_stay_separate() {
+        let tokens = |css: &str| -> Vec<String> {
+            let mut out: Vec<String> = Vec::new();
+            for t in Tokenizer::new(css) {
+                if t == Token::Whitespace && out.last().is_some_and(|l| l == "Whitespace") {
+                    continue;
+                }
+                out.push(format!("{t:?}"));
+            }
+            out
+        };
+        for css in [
+            "p{margin:1px/**/2px}",
+            "a/**/b{}",
+            "p{a:b/**/c;d:#x/**/y;e:1/**/%;f:-/**/-x;g:x/**/(y)}",
+            "p{a:1/**/e2;b:a/**/-;c:./**/5;d:+/**/1;e:1/**/.5;f:1/**/-/**/-x}",
+            "@media/**/screen{}",
+            "p{a:@/**/x;b:#/**/x;c:a/**/url(x);d:a/**/-->}",
+            "p{a:</**/!/**/-/**/-}",
+            "p{a:x /* */ /* */ y}",
+            "p{a:b \\\n;c:d}",
+            "<!--\u{FEFF} p{}",
+        ] {
+            let (sheet, _) = parse_stylesheet(css);
+            let once = serialize_stylesheet(&sheet);
+            let again = serialize_stylesheet(&parse_stylesheet(&once).0);
+            assert_eq!(once, again, "not a fixed point: {css:?} → {once:?}");
+            let strip = |v: Vec<String>| -> Vec<String> {
+                v.into_iter().filter(|t| t != "Whitespace").collect()
+            };
+            // The rules' own tokens, without the ones the parser adds or
+            // drops (`;` after the last declaration, a top-level `<!--`).
+            let mut a = strip(tokens(&once));
+            let mut b = strip(tokens(css));
+            a.retain(|t| t != "Semicolon" && t != "Cdo");
+            b.retain(|t| t != "Semicolon" && t != "Cdo");
+            assert_eq!(a, b, "{css:?} → {once:?}");
+        }
+    }
+
     #[test]
     fn block_contents_roundtrip() {
         let css = "color: red; --x: 1px solid blue; margin:0 10px !important";
@@ -629,12 +863,10 @@ mod tests {
                 .any(|c| needs_control_escape(c) && !matches!(c, '\t' | '\n' | '\r')),
             "control character in {written:?}"
         );
-        // Compared after one plain round trip: two whitespace tokens a
-        // comment kept apart are written as two spaces and read back as one.
-        let reread = |text: &str| serialize_stylesheet(&parse_stylesheet(text).0);
+        let (again, _) = parse_stylesheet(&written);
         assert_eq!(
-            reread(&written),
-            reread(&serialize_stylesheet(&sheet)),
+            serialize_stylesheet(&again),
+            serialize_stylesheet(&sheet),
             "{css:?} → {written:?} reads back differently"
         );
         Ok(written)
@@ -672,7 +904,7 @@ mod tests {
     #[test]
     fn xml_safe_drops_comments() {
         assert_eq!(xml_safe("p{} /* a < b & c ]]> */").unwrap(), "p{}");
-        assert_eq!(xml_safe("a, /* <b> */ b {}").unwrap(), "a,  b {}");
+        assert_eq!(xml_safe("a, /* <b> */ b {}").unwrap(), "a, b {}");
     }
 
     #[test]

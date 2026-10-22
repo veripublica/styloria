@@ -21,8 +21,23 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   delimiter (`@media (width < 600px)`, the nesting selector `&`), a `<!--`,
   a `]]>` spelled by tokens, or a URL holding one of these characters.
   A URL is refused rather than escaped: CSS Syntax decodes the escape, but
-  epubcheck does not (w3c/epubcheck#1746). `serialize_stylesheet` is
-  unchanged.
+  epubcheck does not (w3c/epubcheck#1746).
+
+### Fixed
+
+- **The serializer kept tokens apart only by luck.** Comments are not
+  written, so two tokens a comment separated ran together: `1px/**/2px`
+  came out as the dimension `1px2px`, `a/**/b{}` as the selector `ab`,
+  `@media/**/screen` as `@mediascreen`. Every `serialize_*` function now
+  writes `/**/` between two tokens that would merge (CSS Syntax's
+  serialization table, plus a number before `-` and a `<` before `!`). The
+  output changes in three more ways: a run of whitespace is written as one
+  space, so serializing is a fixed point; a `\` delimiter keeps its
+  newline; and output that would start with U+FEFF gets `/**/` first, so it
+  is not read back as a byte-order mark. Checked on the shelf with `/**/` at
+  every token boundary (35,916 variants): the output always reads back to
+  the input's tokens. One tree has no text: a nested rule whose prelude is
+  only `name:` reads back as a declaration (a browser drops both).
 
 ## [0.15.0] - 2026-10-21
 
