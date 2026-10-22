@@ -58,7 +58,7 @@ assert_eq!(rule.span.start_line_col(css), (1, 1));
   CSS. `serialize_stylesheet_for_xml` writes it so it can stand inside an
   XHTML `<style>` as it is: no `<`, `&` or `]]>`, CSS escapes where a
   string or name holds one, and an error with the span where nothing can
-  (a `<` delimiter in a media query, the nesting selector `&`, a URL).
+  (a `<` delimiter in a media query, the nesting selector `&`).
 - **Bounded on hostile input.** Nesting has a depth limit, matching and
   value checks have step budgets, and parsing stays linear, so no
   stylesheet can exhaust the stack or the clock. No dependencies.

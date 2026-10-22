@@ -14,7 +14,6 @@
 use crate::parser::{
     BlockItem, BlockKind, ComponentValue, Declaration, Rule, SimpleBlock, Stylesheet,
 };
-use crate::references::url_references;
 use crate::span::{Span, Spanned};
 use crate::token::Token;
 use crate::tokenizer::is_name;
@@ -88,40 +87,26 @@ pub fn serialize_ident(s: &str, out: &mut String) {
     serialize_name(s, out, true, false);
 }
 
-/// How a string or URL is being written.
-#[derive(Clone, Copy, PartialEq)]
-enum Mode {
-    Css,
-    Xml,
-    /// XML-safe, and the text is a URL: an XML-unsafe character cannot be
-    /// escaped, since epubcheck does not decode CSS escapes in a URL
-    /// (w3c/epubcheck#1746) and would report a correct book.
-    XmlUrl,
-}
-
-/// Write `c` as itself, or `Err` when XML-safe output cannot hold it.
-/// `Ok(false)` leaves it to the caller.
-fn push_xml(c: char, out: &mut String, mode: Mode) -> Result<bool, ()> {
-    if mode == Mode::Css || !xml_unsafe(c, out) {
-        return Ok(false);
+/// In XML-safe output, write `c` as a CSS escape if XML cannot hold it as
+/// itself. Whether it did is the answer.
+fn escape_for_xml(c: char, out: &mut String, xml: bool) -> bool {
+    if xml && xml_unsafe(c, out) {
+        escape_code_point(c, out);
+        return true;
     }
-    if mode == Mode::XmlUrl {
-        return Err(());
-    }
-    escape_code_point(c, out);
-    Ok(true)
+    false
 }
 
 /// Append `s` as a double-quoted string, escaped so it re-tokenizes as the
 /// same string.
 pub fn serialize_string(s: &str, out: &mut String) {
-    let _ = write_string(s, out, Mode::Css);
+    write_string(s, out, false);
 }
 
-fn write_string(s: &str, out: &mut String, mode: Mode) -> Result<(), ()> {
+fn write_string(s: &str, out: &mut String, xml: bool) {
     out.push('"');
     for c in s.chars() {
-        if push_xml(c, out, mode)? {
+        if escape_for_xml(c, out, xml) {
             continue;
         }
         match c {
@@ -135,7 +120,6 @@ fn write_string(s: &str, out: &mut String, mode: Mode) -> Result<(), ()> {
         }
     }
     out.push('"');
-    Ok(())
 }
 
 /// Serializes a bare (unquoted) `url(...)` token's contents, escaping
@@ -143,13 +127,13 @@ fn write_string(s: &str, out: &mut String, mode: Mode) -> Result<(), ()> {
 /// re-tokenize as a `url-token` rather than accidentally becoming a
 /// `bad-url-token`.
 pub fn serialize_url(s: &str, out: &mut String) {
-    let _ = write_url(s, out, Mode::Css);
+    write_url(s, out, false);
 }
 
-fn write_url(s: &str, out: &mut String, mode: Mode) -> Result<(), ()> {
+fn write_url(s: &str, out: &mut String, xml: bool) {
     out.push_str("url(");
     for c in s.chars() {
-        if push_xml(c, out, mode)? {
+        if escape_for_xml(c, out, xml) {
             continue;
         }
         match c {
@@ -162,7 +146,6 @@ fn write_url(s: &str, out: &mut String, mode: Mode) -> Result<(), ()> {
         }
     }
     out.push(')');
-    Ok(())
 }
 
 fn serialize_dimension_unit(unit: &str, out: &mut String, xml: bool) {
@@ -199,11 +182,9 @@ pub enum XmlSafeErrorKind {
     Delimiter(char),
     /// A `<!--`.
     Cdo,
-    /// A URL holding `<`, `&`, a `>` after `]]`, or a character XML does not
-    /// allow. CSS Syntax decodes an escape in a URL, but epubcheck does not
-    /// (w3c/epubcheck#1746), so the URL is refused rather than escaped. A
-    /// `<bad-url-token>` holding one is refused too.
-    Url,
+    /// A `<bad-url-token>` holding `<`, `&`, `]]>` or a character XML does
+    /// not allow: it is written as its source text, which has no escapes.
+    BadUrl,
     /// A `>` delimiter right after two `]`, which would close a CDATA
     /// section.
     CdataEnd,
@@ -214,7 +195,9 @@ impl std::fmt::Display for XmlSafeError {
         match self.kind {
             XmlSafeErrorKind::Delimiter(c) => write!(f, "a {c:?} delimiter")?,
             XmlSafeErrorKind::Cdo => f.write_str("a `<!--`")?,
-            XmlSafeErrorKind::Url => f.write_str("a URL holding a character XML cannot take")?,
+            XmlSafeErrorKind::BadUrl => {
+                f.write_str("a bad URL holding a character XML cannot take")?
+            }
             XmlSafeErrorKind::CdataEnd => f.write_str("a `]]>`")?,
         }
         write!(
@@ -226,20 +209,6 @@ impl std::fmt::Display for XmlSafeError {
 }
 
 impl std::error::Error for XmlSafeError {}
-
-/// What XML-safe output needs while it walks the tree: the spans of the
-/// strings that are URLs (`@import "a.css"`, `url("a.png")`), in source
-/// order.
-struct Xml {
-    urls: Vec<Span>,
-}
-
-impl Xml {
-    fn is_url(&self, span: Span) -> bool {
-        let i = self.urls.partition_point(|u| u.start <= span.start);
-        i > 0 && span.end <= self.urls[i - 1].end
-    }
-}
 
 type Written = Result<(), XmlSafeError>;
 
@@ -350,17 +319,18 @@ fn prev_of(t: &Token) -> Prev {
 
 /// Writes the tree, keeping track of the last token so that two tokens a
 /// comment kept apart are not run together.
-struct Writer<'x> {
+struct Writer {
     out: String,
-    xml: Option<&'x Xml>,
+    /// XML-safe output: see [`serialize_stylesheet_for_xml`].
+    xml: bool,
     prev: Prev,
 }
 
-impl Writer<'_> {
-    fn plain(out: &mut String) -> Writer<'static> {
+impl Writer {
+    fn plain(out: &mut String) -> Writer {
         Writer {
             out: std::mem::take(out),
-            xml: None,
+            xml: false,
             prev: Prev::Other,
         }
     }
@@ -380,12 +350,12 @@ impl Writer<'_> {
     }
 
     fn name(&mut self, s: &str, check_leading_digit: bool) {
-        serialize_name(s, &mut self.out, check_leading_digit, self.xml.is_some());
+        serialize_name(s, &mut self.out, check_leading_digit, self.xml);
     }
 
     fn token(&mut self, t: &Token, span: Span) -> Written {
         let refuse = |kind| Err(XmlSafeError { span, kind });
-        let x = self.xml.is_some();
+        let x = self.xml;
         // Two whitespace tokens (a comment once stood between them) are
         // written as one space, as they read back.
         if *t == Token::Whitespace && self.prev == Prev::Whitespace {
@@ -420,26 +390,12 @@ impl Writer<'_> {
                 out.push('#');
                 serialize_name(value, out, *is_id, x);
             }
-            Token::String(s) => {
-                let mode = match self.xml {
-                    None => Mode::Css,
-                    Some(xml) if xml.is_url(span) => Mode::XmlUrl,
-                    Some(_) => Mode::Xml,
-                };
-                if write_string(s, out, mode).is_err() {
-                    return refuse(XmlSafeErrorKind::Url);
-                }
-            }
+            Token::String(s) => write_string(s, out, x),
             // An unterminated string: a quote and the newline that ended it,
             // which re-tokenizes as a bad string again rather than swallowing
             // the text after it.
             Token::BadString => out.push_str("\"\n"),
-            Token::Url(s) => {
-                let mode = if x { Mode::XmlUrl } else { Mode::Css };
-                if write_url(s, out, mode).is_err() {
-                    return refuse(XmlSafeErrorKind::Url);
-                }
-            }
+            Token::Url(s) => write_url(s, out, x),
             Token::BadUrl(raw) => {
                 if x {
                     // Only the last two characters written can join a `]]>`.
@@ -450,7 +406,7 @@ impl Writer<'_> {
                         let xml_control =
                             needs_control_escape(c) && !matches!(c, '\t' | '\n' | '\r');
                         if xml_control || xml_unsafe(c, &probe) {
-                            return refuse(XmlSafeErrorKind::Url);
+                            return refuse(XmlSafeErrorKind::BadUrl);
                         }
                         probe.push(c);
                     }
@@ -653,21 +609,20 @@ pub fn serialize_stylesheet(sheet: &Stylesheet) -> String {
 /// The stylesheet as [`serialize_stylesheet`] writes it, but fit to stand as
 /// the text of an XHTML `<style>` element without XML escaping: no `<`, no
 /// `&`, no `]]>`, and only characters XML 1.0 allows. Where one of those is
-/// inside a string, an identifier or a hash it is written as a CSS escape
+/// inside a string, an identifier, a hash or a URL it is written as a CSS
+/// escape
 /// (`\3c `, `\26 `, `\3e `), which an XML and an HTML parser both pass
-/// through and CSS reads back as the same text.
+/// through and CSS reads back as the same text (CSS Syntax decodes escapes
+/// in URLs too, §4.3.6).
 ///
 /// The error names the first component value no escape can save: a `<` or
 /// `&` delimiter (`@media (width < 600px)`, the nesting selector `&`), a
-/// `<!--`, a URL holding such a character, or a `]]>` the tokens themselves
-/// spell.
+/// `<!--`, a `<bad-url-token>` holding such a character, or a `]]>` the
+/// tokens themselves spell.
 pub fn serialize_stylesheet_for_xml(sheet: &Stylesheet) -> Result<String, XmlSafeError> {
-    let xml = Xml {
-        urls: url_references(sheet).into_iter().map(|u| u.span).collect(),
-    };
     let mut w = Writer {
         out: String::new(),
-        xml: Some(&xml),
+        xml: true,
         prev: Prev::Other,
     };
     w.rules(sheet)?;
@@ -930,21 +885,30 @@ mod tests {
     }
 
     #[test]
-    fn xml_safe_refuses_urls_rather_than_escaping_them() {
-        for (css, url) in [
-            ("p { background: url(a&b.png) }", "url(a&b.png)"),
-            ("p { background: url(\"a<b.png\") }", "\"a<b.png\""),
-            ("@import \"a&b.css\";", "\"a&b.css\""),
-            ("@namespace x \"urn:a&b\";", "\"urn:a&b\""),
-            ("p { background: url(a]]>b) }", "url(a]]>b)"),
-            ("p { background: url(a b&c) }", "url(a b&c)"),
+    fn xml_safe_escapes_inside_urls() {
+        for (css, written) in [
+            (
+                "p { background: url(a&b.png) }",
+                "p {background:url(a\\26 b.png);}",
+            ),
+            (
+                "p { background: url(\"a<b.png\") }",
+                "p {background:url(\"a\\3c b.png\");}",
+            ),
+            ("@import \"a&b.css\";", "@import \"a\\26 b.css\";"),
+            (
+                "p { background: url(a]]>b) }",
+                "p {background:url(a]]\\3e b);}",
+            ),
+            // `>` alone is XML-safe.
+            ("p{background:url(a>b.png)}", "p{background:url(a>b.png);}"),
         ] {
-            assert_eq!(xml_refused(css), (XmlSafeErrorKind::Url, url), "{css}");
+            assert_eq!(xml_safe(css).unwrap(), written, "{css}");
         }
-        // `>` alone is XML-safe, and a url without these characters passes.
+        // A bad URL is its source text: nothing in it can be escaped.
         assert_eq!(
-            xml_safe("p{background:url(a>b.png) url(\"c.png\")}").unwrap(),
-            "p{background:url(a>b.png) url(\"c.png\");}"
+            xml_refused("p { background: url(a b&c) }"),
+            (XmlSafeErrorKind::BadUrl, "url(a b&c)")
         );
     }
 }

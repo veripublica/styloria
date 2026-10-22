@@ -14,14 +14,13 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 - **XML-safe serialization**: `serialize_stylesheet_for_xml` writes a
   stylesheet that can be the text of an XHTML `<style>` element as it
   stands, with no XML escaping: no `<`, `&` or `]]>`, and only characters
-  XML 1.0 allows. In strings, identifiers, hashes and units they become
-  CSS escapes (`\3c `, `\26 `, `\3e `), which an XML and an HTML parser
-  both pass through. Where no escape keeps the meaning it returns an
+  XML 1.0 allows. In strings, identifiers, hashes, units and URLs they
+  become CSS escapes (`\3c `, `\26 `, `\3e `), which an XML and an HTML
+  parser both pass through. Where no escape keeps the meaning it returns an
   `XmlSafeError` with the span and an `XmlSafeErrorKind`: a `<` or `&`
   delimiter (`@media (width < 600px)`, the nesting selector `&`), a `<!--`,
-  a `]]>` spelled by tokens, or a URL holding one of these characters.
-  A URL is refused rather than escaped: CSS Syntax decodes the escape, but
-  epubcheck does not (w3c/epubcheck#1746).
+  a `]]>` spelled by tokens, or a `<bad-url-token>` holding one of these
+  characters.
 
 ### Fixed
 
