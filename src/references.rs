@@ -9,7 +9,10 @@
 use std::borrow::Cow;
 
 use crate::parser::{BlockItem, ComponentValue, Rule, Stylesheet, holds_style_rules, unprefixed};
-use crate::selector::{PseudoClass, SelectorList, SimpleSelector, parse_selector_list_lenient};
+use crate::selector::{
+    PseudoClass, SelectorList, SimpleSelector, parse_selector_list_lenient,
+    parse_selector_list_lenient_before_7129,
+};
 use crate::span::{Span, Spanned};
 use crate::token::Token;
 
@@ -246,6 +249,12 @@ pub struct SelectorReference<'a> {
     /// rule: `#09 { }` names the id `09` but never styles it. A tool that
     /// renames ids leaves such a reference alone.
     pub dropped: bool,
+    /// Whether it hangs on w3c/csswg-drafts#7129, which took some code
+    /// points at or above U+0080 out of the ident code points (U+00A0, `‣`):
+    /// the reference is there in only one of the two readings (`#◰` names
+    /// the id `◰` only before #7129), or its rule is dropped in only one.
+    /// [`dropped`](Self::dropped) is then false.
+    pub narrowed_ident: bool,
 }
 
 /// Every type, class, id and attribute selector in a stylesheet's style
@@ -254,17 +263,21 @@ pub struct SelectorReference<'a> {
 ///
 /// A selector with a structure error ([`InvalidSelectorStructure`]) still
 /// names what it names and is included; one with a token error
-/// ([`InvalidSelector`]) is not, since it cannot be read.
+/// ([`InvalidSelector`]) is not, since it cannot be read. A selector that
+/// reads otherwise before w3c/csswg-drafts#7129 gives the references of both
+/// readings, those of only one marked
+/// [`narrowed_ident`](SelectorReference::narrowed_ident).
 ///
 /// [`InvalidSelectorStructure`]: crate::SyntaxErrorKind::InvalidSelectorStructure
 /// [`InvalidSelector`]: crate::SyntaxErrorKind::InvalidSelector
 pub fn selector_references<'a>(sheet: &Stylesheet<'a>) -> Vec<SelectorReference<'a>> {
     /// A block being walked: its rules left, whether they are nested in a
-    /// style rule, and whether a rule around them is dropped.
+    /// style rule, and whether a rule around them is dropped: as it reads,
+    /// and before csswg-drafts#7129.
     struct Frame<'s, 'a> {
         items: &'s [BlockItem<'a>],
         nested: bool,
-        dropped: bool,
+        dropped: (bool, bool),
     }
     let mut out = Vec::new();
     let mut stack: Vec<Frame<'_, 'a>> = Vec::new();
@@ -286,27 +299,39 @@ pub fn selector_references<'a>(sheet: &Stylesheet<'a>) -> Vec<SelectorReference<
                     continue;
                 }
             },
-            None => top.next().map(|r| (r, false, false)),
+            None => top.next().map(|r| (r, false, (false, false))),
         };
-        let Some((rule, nested, outer_dropped)) = next else {
+        let Some((rule, nested, (outer_now, outer_before))) = next else {
             break;
         };
         let top_level = stack.is_empty();
         match &rule.node {
             Rule::Qualified(q) => {
                 let (list, error) = parse_selector_list_lenient(&q.prelude, nested);
+                let before = parse_selector_list_lenient_before_7129(&q.prelude, nested);
                 // A dropped rule takes the rules nested in it along.
-                let dropped = outer_dropped || error;
+                let now = outer_now || error;
+                let then = outer_before || before.as_ref().map_or(error, |(_, e)| *e);
                 let at = Place {
                     rule: rule.span,
                     top_level,
-                    dropped,
+                    dropped: now && then,
+                    narrowed: now != then,
                 };
-                walk_list(&list, &at, false, &mut out);
+                match before {
+                    None => walk_list(&list, &at, false, &mut out),
+                    Some((old, _)) => {
+                        let mut today = Vec::new();
+                        walk_list(&list, &at, false, &mut today);
+                        let mut then = Vec::new();
+                        walk_list(&old, &at, false, &mut then);
+                        both_readings(today, then, &mut out);
+                    }
+                }
                 stack.push(Frame {
                     items: &q.block.node,
                     nested: true,
-                    dropped,
+                    dropped: (now, then),
                 });
             }
             Rule::At(a) => {
@@ -316,7 +341,7 @@ pub fn selector_references<'a>(sheet: &Stylesheet<'a>) -> Vec<SelectorReference<
                     stack.push(Frame {
                         items: &block.node,
                         nested,
-                        dropped: outer_dropped,
+                        dropped: (outer_now, outer_before),
                     });
                 }
             }
@@ -325,11 +350,44 @@ pub fn selector_references<'a>(sheet: &Stylesheet<'a>) -> Vec<SelectorReference<
     out
 }
 
+/// The references of one rule as it reads and as it read before
+/// csswg-drafts#7129, merged in source order; one found in only one reading
+/// is marked.
+fn both_readings<'a>(
+    today: Vec<SelectorReference<'a>>,
+    then: Vec<SelectorReference<'a>>,
+    out: &mut Vec<SelectorReference<'a>>,
+) {
+    let key = |r: &SelectorReference<'_>| (r.selector.span.start, r.selector.span.end);
+    let seen: std::collections::HashMap<_, _> =
+        today.iter().map(|r| (key(r), &r.selector)).collect();
+    let kept: std::collections::HashSet<_> = then
+        .iter()
+        .filter(|r| seen.get(&key(r)) == Some(&&r.selector))
+        .map(key)
+        .collect();
+    let start = out.len();
+    for mut r in then {
+        r.narrowed_ident |= !kept.contains(&key(&r));
+        out.push(r);
+    }
+    for mut r in today {
+        if !kept.contains(&key(&r)) {
+            r.narrowed_ident = true;
+            out.push(r);
+        }
+    }
+    out[start..].sort_by_key(|r| r.selector.span.start);
+}
+
 /// The rule a selector list belongs to.
 struct Place {
     rule: Span,
     top_level: bool,
+    /// In both readings, before csswg-drafts#7129 and after.
     dropped: bool,
+    /// In only one of them.
+    narrowed: bool,
 }
 
 fn walk_list<'a>(
@@ -354,6 +412,7 @@ fn walk_list<'a>(
                 in_argument,
                 top_level: at.top_level,
                 dropped: at.dropped,
+                narrowed_ident: at.narrowed,
             }),
             SimpleSelector::PseudoClass(p) => {
                 let arg = match p {
@@ -536,5 +595,54 @@ div { cursor: src("c.cur"), auto; & span { content: url(n.png) } }"#;
         );
         assert!(all[3].in_argument);
         assert_eq!(all[3].selector.span.slice(css), "[id=x i]");
+    }
+
+    /// Before csswg-drafts#7129 these code points were name code points; a
+    /// reference found in only one reading, or in a rule dropped in only
+    /// one, is marked.
+    #[test]
+    fn narrowed_ident_references_are_marked() {
+        let marks = |css: &str| -> Vec<(String, bool, bool)> {
+            let sheet = crate::parse_stylesheet(css).0;
+            selector_references(&sheet)
+                .into_iter()
+                .map(|r| {
+                    let spelling = r.selector.span.slice(css).to_string();
+                    (spelling, r.narrowed_ident, r.dropped)
+                })
+                .collect()
+        };
+        let m = |t: &str, narrowed, dropped| (t.to_string(), narrowed, dropped);
+        // `#◰` is an id only in the old reading; the rule is dropped in the
+        // new one, so `p` hangs on #7129 too.
+        assert_eq!(
+            marks("p, #◰ { } .k { }"),
+            [
+                m("p", true, false),
+                m("#◰", true, false),
+                m(".k", false, false)
+            ]
+        );
+        let sheet = crate::parse_stylesheet("#◰ { }").0;
+        let SimpleSelector::Id(id) = &selector_references(&sheet)[0].selector.node else {
+            panic!();
+        };
+        assert_eq!(id.as_ref(), "◰");
+        // A forgiving list keeps the rule either way: only `.a‣b` is marked.
+        assert_eq!(
+            marks("p:is(.a\u{A0}b, .c) { }"),
+            [
+                m("p", false, false),
+                m(".a\u{A0}b", true, false),
+                m(".c", false, false)
+            ]
+        );
+        // Nested rules follow their parent's two readings.
+        assert_eq!(
+            marks(".‣ { .in { } }"),
+            [m(".‣", true, false), m(".in", true, false)]
+        );
+        // Dropped in both readings: dropped, not marked.
+        assert_eq!(marks(".‣ . b, p { }"), [m("p", false, true)]);
     }
 }

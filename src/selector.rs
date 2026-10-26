@@ -619,8 +619,7 @@ pub fn parse_relative_selector_list<'a>(
 /// fails only because of a code point the 2026 CSS Syntax CRD took out of
 /// the ident code points, and parses with it as a name code point
 /// (w3c/csswg-drafts#7129), reports
-/// [`NarrowedIdent`](SyntaxErrorKind::NarrowedIdent) at that code point. So
-/// does one whose old reading cannot be rebuilt.
+/// [`NarrowedIdent`](SyntaxErrorKind::NarrowedIdent) at that code point.
 fn rule_list<'a>(prelude: &Values<'a>, relative: bool) -> (SelectorList<'a>, Vec<SyntaxError>) {
     let (selectors, mut errors) = list(prelude, relative, 0, false);
     if errors.is_empty() {
@@ -632,9 +631,10 @@ fn rule_list<'a>(prelude: &Values<'a>, relative: bool) -> (SelectorList<'a>, Vec
         return (selectors, errors);
     }
     let old_errors = match crate::narrowed::relax(prelude, crate::parser::MAX_NESTING_DEPTH) {
-        Relaxed::Same => return (selectors, errors),
-        Relaxed::Unsure => None,
-        Relaxed::Read(old) => Some(list(&old, relative, 0, false).1),
+        // Unsure only at an exponent's sign (`.‣1e+3`), which leaves a
+        // number where no selector takes one: the old reading fails too.
+        Relaxed::Same | Relaxed::Unsure => return (selectors, errors),
+        Relaxed::Read(old) => list(&old, relative, 0, false).1,
     };
     // Commas between selectors are where they were in either reading.
     let commas: Vec<usize> = prelude
@@ -650,13 +650,13 @@ fn rule_list<'a>(prelude: &Values<'a>, relative: bool) -> (SelectorList<'a>, Vec
         first[part(s.start)] = Some(*s);
     }
     let mut old_fails = vec![false; commas.len() + 1];
-    for o in old_errors.iter().flatten() {
+    for o in &old_errors {
         old_fails[part(o.span.start)] = true;
     }
     for e in &mut errors {
         let p = part(e.span.start);
         if let Some(span) = first[p]
-            && (old_errors.is_none() || !old_fails[p])
+            && !old_fails[p]
         {
             *e = SyntaxError {
                 span,
@@ -667,15 +667,27 @@ fn rule_list<'a>(prelude: &Values<'a>, relative: bool) -> (SelectorList<'a>, Vec
     (selectors, errors)
 }
 
-/// A style rule's selector list read as before w3c/csswg-drafts#7129, when
-/// that reading can be rebuilt and parses.
-pub(crate) fn parse_selector_list_before_7129<'a>(
+/// A style rule's selector list as it reads before w3c/csswg-drafts#7129.
+pub(crate) enum BeforeNarrowing<'a> {
+    /// It reads as it does today.
+    Same,
+    Parsed(SelectorList<'a>),
+    /// It does not parse, or cannot be rebuilt: there, only an exponent's
+    /// sign (`.‣1e+3`), which leaves a number where no selector takes one.
+    Dropped,
+}
+
+pub(crate) fn selector_list_before_7129<'a>(
     prelude: &Values<'a>,
     relative: bool,
-) -> Option<SelectorList<'a>> {
+) -> BeforeNarrowing<'a> {
     match crate::narrowed::relax(prelude, crate::parser::MAX_NESTING_DEPTH) {
-        Relaxed::Read(old) => into_result(list(&old, relative, 0, false)).ok(),
-        Relaxed::Same | Relaxed::Unsure => None,
+        Relaxed::Same => BeforeNarrowing::Same,
+        Relaxed::Unsure => BeforeNarrowing::Dropped,
+        Relaxed::Read(old) => match into_result(list(&old, relative, 0, false)) {
+            Ok(list) => BeforeNarrowing::Parsed(list),
+            Err(_) => BeforeNarrowing::Dropped,
+        },
     }
 }
 
@@ -757,6 +769,21 @@ pub(crate) fn parse_selector_list_lenient<'a>(
 ) -> (SelectorList<'a>, bool) {
     let (list, errors) = list(prelude, relative, 0, true);
     (list, !errors.is_empty())
+}
+
+/// [`parse_selector_list_lenient`] on the prelude as it reads before
+/// w3c/csswg-drafts#7129; `None` when that reads as it does today. Where
+/// the old reading cannot be rebuilt (an exponent's sign, `.‣1e+3`), it is
+/// taken as dropped.
+pub(crate) fn parse_selector_list_lenient_before_7129<'a>(
+    prelude: &Values<'a>,
+    relative: bool,
+) -> Option<(SelectorList<'a>, bool)> {
+    match crate::narrowed::relax(prelude, crate::parser::MAX_NESTING_DEPTH) {
+        Relaxed::Same => None,
+        Relaxed::Unsure => Some((SelectorList::default(), true)),
+        Relaxed::Read(old) => Some(parse_selector_list_lenient(&old, relative)),
+    }
 }
 
 /// The selectors that parsed, and the errors for those that did not. With
@@ -2269,6 +2296,8 @@ mod tests {
             ("p { & .‣ { color: red } }", vec![N], Some("‣")),
             // The old reading fails too: the token error stands.
             (".‣ . b { color: red }", vec![T], Some(".")),
+            // `‣1e` and a number `+3`: no selector takes a number.
+            (".‣1e+3 { color: red }", vec![T], Some(".")),
             // Each selector its own.
             (".‣, . b { color: red }", vec![N, T], Some("‣")),
             // A name character in either reading: nothing to report.

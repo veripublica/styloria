@@ -17,18 +17,28 @@ w3c/csswg-drafts#7129 is open again, and engines still read them as names.
 Where that change alone decides, the answer is now Unknown rather than
 invalid. The tokenizer is unchanged: it follows the current text.
 
+The old reading is rebuilt from the tokens exactly, checked against the
+same text with those code points escaped. The one shape it leaves unsure is
+a name ending at an exponent's sign (`‣1e+3`).
+
 - **Breaking:** `UnknownValue::NarrowedIdent`. A value that fails its
   grammar, but fits when such code points are read as name code points
   (`@counter-style { symbols: ‣ }`), is Unknown, not Invalid. A value whose
-  old reading fails too (`content: ‣`) stays Invalid; a shape the old
-  reading is not rebuilt for (`width: ‣1.5`) is Unknown.
+  old reading fails too (`content: ‣`, `width: ‣1.5`) stays Invalid.
 - **Breaking:** `SyntaxErrorKind::NarrowedIdent`. A style rule's selector
   that fails only in the same way (`.‣`, `p:not(.a‣)`) reports this kind at
   the code point, instead of `InvalidSelector`. One that fails in both
   readings keeps its old error.
-- **Breaking:** `UnknownReason::NarrowedIdent`. The cascade no longer drops
-  such a rule. It reads the selector the old way, and the rule only possibly
-  applies.
+- **Breaking:** `UnknownReason::NarrowedIdent`. The cascade reads such a
+  rule both ways, nested rules following their parent's two readings,
+  forgiving `:is()`/`:where()` arguments included. Where the readings answer
+  an element alike, the answer stands; where they differ, in the match or
+  in its specificity, it is Unknown with this reason. A rule only the old
+  reading keeps is no longer dropped.
+- **Breaking:** `SelectorReference::narrowed_ident`. `selector_references`
+  gives the references of both readings: one found in only one of them
+  (`#◰` names the id `◰` only before #7129), or in a rule dropped in only
+  one, is marked. `dropped` now means dropped in both.
 
 ## [0.16.1] - 2026-10-22
 

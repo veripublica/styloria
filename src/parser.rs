@@ -258,8 +258,8 @@ pub enum SyntaxErrorKind {
     /// ident code points (`.‣`, `.a\u{A0}b`), and that parses with it as a
     /// name code point, as before w3c/csswg-drafts#7129. The issue is open
     /// again, and engines still read these as names, so whether a browser
-    /// drops the rule is not settled. Also reported where that old reading
-    /// cannot be rebuilt. The span is the selector's first such code point.
+    /// drops the rule is not settled. The span is the selector's first such
+    /// code point.
     ///
     /// Ranked as the error it stands for: a selector reports at most one.
     NarrowedIdent,

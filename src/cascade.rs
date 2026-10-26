@@ -92,13 +92,11 @@ use crate::at_rule::{
     evaluate_supports, parse_import_rule, parse_layer_rule, parse_media_query_list, placements,
 };
 use crate::matching::{Element, Match, Namespaces};
-use crate::parser::{
-    self, AtRule, BlockItem, ComponentValue, Declaration, Rule, Stylesheet, SyntaxErrorKind,
-};
+use crate::parser::{self, AtRule, BlockItem, ComponentValue, Declaration, Rule, Stylesheet};
 use crate::properties::{logical_counterparts, longhands};
 use crate::selector::{
-    SelectorList, SimpleSelector, Specificity, parse_relative_selector_list, parse_selector_list,
-    parse_selector_list_before_7129,
+    BeforeNarrowing, SelectorList, SimpleSelector, Specificity, parse_relative_selector_list,
+    parse_selector_list, selector_list_before_7129,
 };
 use crate::span::Spanned;
 use crate::token::Token;
@@ -139,10 +137,13 @@ pub enum UnknownReason {
     Prefixed,
     /// The value is `revert` or `revert-layer`.
     Revert,
-    /// The rule's selector parses only with the code points the 2026 CSS
-    /// Syntax CRD took out of the ident code points read as name code points
-    /// ([`SyntaxErrorKind::NarrowedIdent`]):
-    /// whether a browser keeps the rule is not settled.
+    /// The rule's selector reads otherwise before w3c/csswg-drafts#7129,
+    /// which took some code points at or above U+0080 out of the ident code
+    /// points (`.‣`, `:is(.a‣b)`), and the two readings answer this element
+    /// differently: one matches and the other does not, or not with the same
+    /// specificity. A rule only the old reading keeps
+    /// ([`SyntaxErrorKind::NarrowedIdent`](crate::SyntaxErrorKind::NarrowedIdent))
+    /// is one such.
     NarrowedIdent,
 }
 
@@ -215,7 +216,12 @@ pub struct Cascade<'s, 'a> {
 #[derive(Debug)]
 struct CascadeRule<'s, 'a> {
     rule: &'s Spanned<Rule<'a>>,
+    /// Empty when a browser drops the rule.
     selectors: SelectorList<'a>,
+    /// The selectors as they read before csswg-drafts#7129, where that
+    /// reading may differ ([`UnknownReason::NarrowedIdent`]); empty when it
+    /// drops the rule.
+    before_7129: Option<SelectorList<'a>>,
     declarations: Vec<(&'s Spanned<Declaration<'a>>, u32)>,
     sheet: usize,
     layer: usize,
@@ -256,7 +262,8 @@ impl RuleIndex {
         for (r, rule) in rules.iter().enumerate() {
             let r = u32::try_from(r).unwrap_or(u32::MAX);
             let mut always = false;
-            for s in &rule.selectors.selectors {
+            let old = rule.before_7129.iter().flat_map(|l| &l.selectors);
+            for s in rule.selectors.selectors.iter().chain(old) {
                 let subject = s.node.compounds.last().map(|c| &c.node.simples);
                 match subject.and_then(|simples| key(simples)) {
                     Some(Key::Id(v)) => add(&mut index.ids, v.to_string(), r),
@@ -441,13 +448,32 @@ impl<'s, 'a> Cascade<'s, 'a> {
         for r in self.index.rules_for(element) {
             let r = &self.rules[r as usize];
             let ns = &self.namespaces[r.sheet];
-            let mut best = Match::No;
-            let mut specificity = Specificity::default();
-            for s in &r.selectors.selectors {
-                let m = s.node.matches(element, ns);
-                if m != Match::No {
-                    best = best.or(m);
-                    specificity = specificity.max(s.node.specificity());
+            let best_of = |list: &SelectorList<'a>| {
+                let mut best = Match::No;
+                let mut specificity = Specificity::default();
+                for s in &list.selectors {
+                    let m = s.node.matches(element, ns);
+                    if m != Match::No {
+                        best = best.or(m);
+                        specificity = specificity.max(s.node.specificity());
+                    }
+                }
+                (best, specificity)
+            };
+            let (mut best, mut specificity) = best_of(&r.selectors);
+            // Either reading may be the one a browser follows: where they
+            // part, the rule only possibly applies.
+            let mut unsure = best == Match::Unknown;
+            let mut narrowed = false;
+            if let Some(old) = &r.before_7129 {
+                let (old_best, old_specificity) = best_of(old);
+                unsure |= old_best == Match::Unknown;
+                if (old_best, old_specificity) != (best, specificity) {
+                    narrowed = true;
+                    if best != Match::No || old_best != Match::No {
+                        best = Match::Unknown;
+                    }
+                    specificity = specificity.max(old_specificity);
                 }
             }
             if best == Match::No {
@@ -455,8 +481,11 @@ impl<'s, 'a> Cascade<'s, 'a> {
             }
             // A nested rule's selector is Unknown because its `&` is not
             // resolved; `Nested` already says so.
-            let unsure = best == Match::Unknown && !r.reasons.contains(UnknownReason::Nested);
-            let reasons = r.reasons.with_if(UnknownReason::Selector, unsure);
+            let unsure = unsure && !r.reasons.contains(UnknownReason::Nested);
+            let reasons = r
+                .reasons
+                .with_if(UnknownReason::Selector, unsure)
+                .with_if(UnknownReason::NarrowedIdent, narrowed);
             for (d, order) in &r.declarations {
                 candidates.push(Candidate {
                     declaration: d,
@@ -645,8 +674,14 @@ struct Ctx<'p, 's, 'a> {
     sheet: usize,
     layer: usize,
     reasons: UnknownReasons,
-    /// The style rule this one is nested in, and its resolved selectors.
-    parent: Option<(&'s Spanned<Rule<'a>>, &'p SelectorList<'a>)>,
+    /// The style rule this one is nested in, and its resolved selectors:
+    /// as they read, and before csswg-drafts#7129 where that may differ.
+    /// An empty list is a rule a browser drops.
+    parent: Option<(
+        &'s Spanned<Rule<'a>>,
+        &'p SelectorList<'a>,
+        Option<&'p SelectorList<'a>>,
+    )>,
     /// Inside `@scope`, where `&` at the top stands for the scoping root.
     scoped: bool,
 }
@@ -711,43 +746,60 @@ impl<'s, 'a> Builder<'_, 's, 'a> {
     fn rule(&mut self, rule: &'s Spanned<Rule<'a>>, ctx: &Ctx<'_, 's, 'a>) {
         match &rule.node {
             Rule::Qualified(q) => {
-                let parsed = if ctx.parent.is_some() {
+                let relative = ctx.parent.is_some();
+                let parsed = if relative {
                     parse_relative_selector_list(&q.prelude)
                 } else {
                     parse_selector_list(&q.prelude)
                 };
                 // A rule whose selector does not parse is dropped, nested
-                // rules and all, as a browser does - unless it fails only
-                // through csswg-drafts#7129: then it is read the old way,
-                // and only possibly applies.
-                let (selectors, narrowed) = match parsed {
-                    Ok(selectors) => (selectors, false),
-                    Err(errors)
-                        if errors
-                            .iter()
-                            .all(|e| e.kind == SyntaxErrorKind::NarrowedIdent) =>
-                    {
-                        match parse_selector_list_before_7129(&q.prelude, ctx.parent.is_some()) {
-                            Some(selectors) => (selectors, true),
-                            None => return,
+                // rules and all, as a browser does: its list stays empty.
+                let now = parsed.unwrap_or_default();
+                // Before csswg-drafts#7129 it may read otherwise, through its
+                // own selector or its parent's.
+                let parent_now = ctx.parent.map(|(_, now, _)| now);
+                let parent_before = ctx.parent.and_then(|(_, _, before)| before);
+                let before = match selector_list_before_7129(&q.prelude, relative) {
+                    BeforeNarrowing::Same => parent_before.map(|_| now.clone()),
+                    BeforeNarrowing::Parsed(list) => Some(list),
+                    BeforeNarrowing::Dropped => Some(SelectorList::default()),
+                };
+                let resolve = |list: SelectorList<'a>, parent: Option<&SelectorList<'a>>| {
+                    let resolved = match parent {
+                        _ if list.selectors.is_empty() => return (list, false),
+                        // Inside a rule a browser drops: dropped too.
+                        Some(p) if p.selectors.is_empty() => {
+                            return (SelectorList::default(), false);
                         }
+                        Some(p) => list.resolve_nesting(Some(p)),
+                        // At the top of `@scope`, `&` is the scoping root,
+                        // which this does not know: it stays `&` and
+                        // matches Unknown.
+                        None if ctx.scoped => Some(list.clone()),
+                        None => list.resolve_nesting(None),
+                    };
+                    match resolved {
+                        Some(r) => (r, false),
+                        None => (list, true),
                     }
-                    Err(_) => return,
                 };
-                let resolved = match ctx.parent {
-                    Some((_, parent)) => selectors.resolve_nesting(Some(parent)),
-                    // At the top of `@scope`, `&` is the scoping root, which
-                    // this does not know: it stays `&` and matches Unknown.
-                    None if ctx.scoped => Some(selectors.clone()),
-                    None => selectors.resolve_nesting(None),
+                let (now, unresolved) = resolve(now, parent_now);
+                let (before, unresolved_before) = match before {
+                    Some(b) => {
+                        let (b, unresolved) = resolve(b, parent_before.or(parent_now));
+                        (Some(b), unresolved)
+                    }
+                    None => (None, false),
                 };
-                let unresolved = resolved.is_none();
-                let selectors = resolved.unwrap_or(selectors);
+                if now.selectors.is_empty()
+                    && before.as_ref().is_none_or(|b| b.selectors.is_empty())
+                {
+                    return;
+                }
                 let reasons = ctx
                     .reasons
-                    .with_if(UnknownReason::Nested, unresolved)
-                    .with_if(UnknownReason::NarrowedIdent, narrowed);
-                self.style_rule(rule, selectors, &q.block.node, ctx, reasons);
+                    .with_if(UnknownReason::Nested, unresolved || unresolved_before);
+                self.style_rule(rule, now, before, &q.block.node, ctx, reasons);
             }
             Rule::At(at) => {
                 let Some(block) = &at.block else {
@@ -798,10 +850,11 @@ impl<'s, 'a> Builder<'_, 's, 'a> {
                 match inner.parent {
                     // Inside a style rule, a group rule's own declarations
                     // belong to that rule's selector.
-                    Some((parent, selectors)) => {
+                    Some((parent, selectors, before)) => {
                         let selectors = selectors.clone();
+                        let before = before.cloned();
                         let reasons = inner.reasons;
-                        self.style_rule(parent, selectors, &block.node, &inner, reasons);
+                        self.style_rule(parent, selectors, before, &block.node, &inner, reasons);
                     }
                     None => {
                         for item in &block.node {
@@ -823,6 +876,7 @@ impl<'s, 'a> Builder<'_, 's, 'a> {
         &mut self,
         rule: &'s Spanned<Rule<'a>>,
         selectors: SelectorList<'a>,
+        before_7129: Option<SelectorList<'a>>,
         items: &'s [BlockItem<'a>],
         ctx: &Ctx<'_, 's, 'a>,
         reasons: UnknownReasons,
@@ -831,7 +885,7 @@ impl<'s, 'a> Builder<'_, 's, 'a> {
             sheet: ctx.sheet,
             layer: ctx.layer,
             reasons,
-            parent: Some((rule, &selectors)),
+            parent: Some((rule, &selectors, before_7129.as_ref())),
             scoped: ctx.scoped,
         };
         // Each run of declarations becomes a rule of its own; their
@@ -848,6 +902,7 @@ impl<'s, 'a> Builder<'_, 's, 'a> {
                         self.rules.push(CascadeRule {
                             rule,
                             selectors: SelectorList::default(),
+                            before_7129: None,
                             declarations: Vec::new(),
                             sheet: ctx.sheet,
                             layer: ctx.layer,
@@ -868,8 +923,10 @@ impl<'s, 'a> Builder<'_, 's, 'a> {
         if let Some((&last, rest)) = runs.split_last() {
             for &i in rest {
                 self.rules[i].selectors = selectors.clone();
+                self.rules[i].before_7129 = before_7129.clone();
             }
             self.rules[last].selectors = selectors;
+            self.rules[last].before_7129 = before_7129;
         }
     }
 }
@@ -1511,5 +1568,37 @@ mod tests {
         // Broken in both readings: dropped.
         let c = cascade(&["p:not(.‣) . b, p { width: 1px }"]);
         assert_eq!(ask(&c, P_A, None, "width").0, Match::No);
+        // A nested rule that fails only through #7129, in a rule that parses.
+        let c = cascade(&["p { &:not(.‣) { width: 1px } }"]);
+        assert_eq!(reasons(&c, P_A, "width"), [UnknownReason::NarrowedIdent]);
+    }
+
+    /// A forgiving list drops the argument as written (and a dropped argument
+    /// matches Unknown), and keeps it in the old reading: where the two
+    /// readings answer alike, the answer stands.
+    #[test]
+    fn forgiving_lists_are_read_both_ways() {
+        // Matched alike, with the same specificity: settled.
+        let c = cascade(&["p:where(.‣, .x) { width: 1px }"]);
+        assert_eq!(
+            ask(&c, P_A, None, "width"),
+            (Match::Yes, "width: 1px".into())
+        );
+        use UnknownReason::{NarrowedIdent, Selector};
+        // Unknown as written, No in the old reading.
+        let c = cascade(&["p:is(.‣) { width: 1px }"]);
+        assert_eq!(reasons(&c, P_A, "width"), [Selector, NarrowedIdent]);
+        let c = cascade(&["p:not(:is(.‣)) { width: 1px }"]);
+        assert_eq!(reasons(&c, P_A, "width"), [Selector, NarrowedIdent]);
+        // Nested rules follow their parent's two readings.
+        // Matched in both, but `.‣` counts toward the old reading's
+        // specificity, which can decide against another rule.
+        let c = cascade(&[":is(p, .‣) { & .z, & { width: 1px } }"]);
+        assert_eq!(reasons(&c, P_A, "width"), [NarrowedIdent]);
+        let c = cascade(&["p:where(.‣, .x) { & { width: 1px } }"]);
+        assert_eq!(
+            ask(&c, P_A, None, "width"),
+            (Match::Yes, "width: 1px".into())
+        );
     }
 }

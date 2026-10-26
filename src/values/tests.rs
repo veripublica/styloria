@@ -318,8 +318,6 @@ fn narrowed_ident_code_points_are_unknown() {
             "font-family: a\u{A0}b",
             "font-family: ‣b, serif",
             "animation-name: x‣",
-            // Not rebuilt here: `‣1` was one ident, `.5` a number.
-            "width: ‣1.5",
         ],
     );
     // The old reading fails too.
@@ -328,6 +326,8 @@ fn narrowed_ident_code_points_are_unknown() {
         &[
             "content: ‣",
             "width: 1‣",
+            // `‣1` was one ident, `.5` a number.
+            "width: ‣1.5",
             "list-style-type: a ‣",
             "color: #12‣",
         ],
