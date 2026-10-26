@@ -679,6 +679,12 @@ fn is_non_ascii_ident(c: char) -> bool {
         | 0x10000..)
 }
 
+/// A code point the 2026 CRD took out of the ident code points: at or above
+/// U+0080, a name code point before csswg-drafts#7129, a delim now.
+pub(crate) fn is_narrowed_out(c: char) -> bool {
+    c >= '\u{80}' && !is_non_ascii_ident(c)
+}
+
 /// An ident code point (§4.2), for the serializer's escaping decisions.
 /// NUL is not one here: the serializer substitutes it before asking.
 pub(crate) fn is_name(c: char) -> bool {

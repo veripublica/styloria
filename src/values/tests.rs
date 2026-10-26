@@ -294,3 +294,42 @@ fn font_face_src_is_read_entry_by_entry() {
     assert_eq!(descriptor("font-face", &long), Invalid);
     assert!(start.elapsed().as_secs() < 2, "{:?}", start.elapsed());
 }
+
+/// A code point the 2026 CRD took out of the ident code points is a delim
+/// now; csswg-drafts#7129 is open, so a value that would fit with it as a
+/// name code point is not certainly invalid.
+#[test]
+fn narrowed_ident_code_points_are_unknown() {
+    use ValueCheck::*;
+    let narrowed = Unknown(UnknownValue::NarrowedIdent);
+    for (at, decl, want) in [
+        ("counter-style", "symbols: ‣", narrowed),
+        ("counter-style", "symbols: ◰ ◳ ◲ ◱", narrowed),
+        ("counter-style", "additive-symbols: 6 ⚅, 5 ⚄", narrowed),
+        ("counter-style", "symbols: ‣ \"*\"", narrowed),
+        ("counter-style", "symbols: 12", Invalid),
+    ] {
+        assert_eq!(descriptor(at, decl), want, "@{at} {decl}");
+    }
+    all(
+        narrowed,
+        &[
+            "list-style-type: ‣",
+            "font-family: a\u{A0}b",
+            "font-family: ‣b, serif",
+            "animation-name: x‣",
+            // Not rebuilt here: `‣1` was one ident, `.5` a number.
+            "width: ‣1.5",
+        ],
+    );
+    // The old reading fails too.
+    all(
+        Invalid,
+        &[
+            "content: ‣",
+            "width: 1‣",
+            "list-style-type: a ‣",
+            "color: #12‣",
+        ],
+    );
+}

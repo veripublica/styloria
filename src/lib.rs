@@ -29,6 +29,7 @@ mod descriptors;
 mod encodings;
 mod known_properties;
 pub mod matching;
+mod narrowed;
 pub mod parser;
 pub mod properties;
 mod pseudos;

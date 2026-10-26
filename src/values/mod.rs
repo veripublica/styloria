@@ -30,7 +30,10 @@
 //!   defines for the property (`display: oeb-page-head`, EPUB 2), or one a
 //!   CSS specification leaves optional (`writing-mode: tb-rl`, SVG 1.1's;
 //!   `outline-color: invert`);
-//! - a vendor-prefixed keyword or function: engines accept their own.
+//! - a vendor-prefixed keyword or function: engines accept their own;
+//! - a code point the 2026 CSS Syntax CRD took out of the ident code points
+//!   (`symbols: ‣`), when the value read with it as a name code point fits,
+//!   or when that reading cannot be rebuilt: w3c/csswg-drafts#7129 is open.
 //!
 //! A custom property (`--*`) takes any value, and the CSS-wide keywords
 //! (`inherit`, `initial`, `unset`, `revert`, `revert-layer`) fit every
@@ -47,6 +50,7 @@ use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::OnceLock;
 
 use crate::known_properties::is_known_property;
+use crate::narrowed::Relaxed;
 use crate::parser::{BlockKind, ComponentValue, Declaration, unprefixed};
 use crate::span::Spanned;
 use crate::token::{NumericType, Token};
@@ -133,6 +137,11 @@ pub enum UnknownValue {
     Unread,
     /// Matching took more than [`MAX_VALUE_STEPS`].
     TooComplex,
+    /// It fits no grammar as written, but would if the code points at or
+    /// above U+0080 that the 2026 CSS Syntax CRD took out of the ident code
+    /// points were name code points again (`symbols: ‣`), or holds them
+    /// where that cannot be told. w3c/csswg-drafts#7129 is open.
+    NarrowedIdent,
 }
 
 /// Check a declaration's value against its property.
@@ -143,6 +152,12 @@ pub fn check_declaration(d: &Declaration<'_>) -> ValueCheck {
 /// Check a value, as the parser gives it (without `!important`), against
 /// the grammar of `property`.
 pub fn check_value(property: &str, value: &[Spanned<ComponentValue<'_>>]) -> ValueCheck {
+    let verdict = check_value_as_written(property, value);
+    unsettled(verdict, value, |v| check_value_as_written(property, v))
+}
+
+/// [`check_value`] on the value's tokens as they stand.
+fn check_value_as_written(property: &str, value: &[Spanned<ComponentValue<'_>>]) -> ValueCheck {
     if property.starts_with("--") {
         return ValueCheck::Valid;
     }
@@ -178,6 +193,38 @@ pub fn check_descriptor(
     name: &str,
     value: &[Spanned<ComponentValue<'_>>],
 ) -> ValueCheck {
+    let verdict = check_descriptor_as_written(at_rule, name, value);
+    unsettled(verdict, value, |v| {
+        check_descriptor_as_written(at_rule, name, v)
+    })
+}
+
+/// An Invalid `verdict` made [`UnknownValue::NarrowedIdent`] when the value,
+/// read as before csswg-drafts#7129, fits (`again`) or cannot be rebuilt.
+fn unsettled<'a>(
+    verdict: ValueCheck,
+    value: &[Spanned<ComponentValue<'a>>],
+    again: impl FnOnce(&[Spanned<ComponentValue<'a>>]) -> ValueCheck,
+) -> ValueCheck {
+    if verdict != ValueCheck::Invalid {
+        return verdict;
+    }
+    match crate::narrowed::relax(value, MAX_VALUE_DEPTH) {
+        Relaxed::Same => verdict,
+        Relaxed::Unsure => ValueCheck::Unknown(UnknownValue::NarrowedIdent),
+        Relaxed::Read(old) => match again(&old) {
+            ValueCheck::Invalid => verdict,
+            _ => ValueCheck::Unknown(UnknownValue::NarrowedIdent),
+        },
+    }
+}
+
+/// [`check_descriptor`] on the value's tokens as they stand.
+fn check_descriptor_as_written(
+    at_rule: &str,
+    name: &str,
+    value: &[Spanned<ComponentValue<'_>>],
+) -> ValueCheck {
     if name.starts_with('-') {
         return ValueCheck::Unknown(UnknownValue::PrefixedProperty);
     }
@@ -190,7 +237,7 @@ pub fn check_descriptor(
     key.make_ascii_lowercase();
     if !grammars().properties.contains_key(key.as_str()) {
         return if at_rule.eq_ignore_ascii_case("page") {
-            check_value(name, value)
+            check_value_as_written(name, value)
         } else {
             ValueCheck::Unknown(UnknownValue::UnknownProperty)
         };

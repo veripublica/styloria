@@ -92,10 +92,13 @@ use crate::at_rule::{
     evaluate_supports, parse_import_rule, parse_layer_rule, parse_media_query_list, placements,
 };
 use crate::matching::{Element, Match, Namespaces};
-use crate::parser::{self, AtRule, BlockItem, ComponentValue, Declaration, Rule, Stylesheet};
+use crate::parser::{
+    self, AtRule, BlockItem, ComponentValue, Declaration, Rule, Stylesheet, SyntaxErrorKind,
+};
 use crate::properties::{logical_counterparts, longhands};
 use crate::selector::{
     SelectorList, SimpleSelector, Specificity, parse_relative_selector_list, parse_selector_list,
+    parse_selector_list_before_7129,
 };
 use crate::span::Spanned;
 use crate::token::Token;
@@ -136,6 +139,11 @@ pub enum UnknownReason {
     Prefixed,
     /// The value is `revert` or `revert-layer`.
     Revert,
+    /// The rule's selector parses only with the code points the 2026 CSS
+    /// Syntax CRD took out of the ident code points read as name code points
+    /// ([`SyntaxErrorKind::NarrowedIdent`]):
+    /// whether a browser keeps the rule is not settled.
+    NarrowedIdent,
 }
 
 /// A set of [`UnknownReason`]s; empty for a declaration that certainly
@@ -143,7 +151,7 @@ pub enum UnknownReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct UnknownReasons(u8);
 
-const ALL_REASONS: [UnknownReason; 7] = [
+const ALL_REASONS: [UnknownReason; 8] = [
     UnknownReason::Selector,
     UnknownReason::Conditional,
     UnknownReason::ConditionalSheet,
@@ -151,6 +159,7 @@ const ALL_REASONS: [UnknownReason; 7] = [
     UnknownReason::Logical,
     UnknownReason::Prefixed,
     UnknownReason::Revert,
+    UnknownReason::NarrowedIdent,
 ];
 
 impl UnknownReasons {
@@ -708,8 +717,23 @@ impl<'s, 'a> Builder<'_, 's, 'a> {
                     parse_selector_list(&q.prelude)
                 };
                 // A rule whose selector does not parse is dropped, nested
-                // rules and all, as a browser does.
-                let Ok(selectors) = parsed else { return };
+                // rules and all, as a browser does - unless it fails only
+                // through csswg-drafts#7129: then it is read the old way,
+                // and only possibly applies.
+                let (selectors, narrowed) = match parsed {
+                    Ok(selectors) => (selectors, false),
+                    Err(errors)
+                        if errors
+                            .iter()
+                            .all(|e| e.kind == SyntaxErrorKind::NarrowedIdent) =>
+                    {
+                        match parse_selector_list_before_7129(&q.prelude, ctx.parent.is_some()) {
+                            Some(selectors) => (selectors, true),
+                            None => return,
+                        }
+                    }
+                    Err(_) => return,
+                };
                 let resolved = match ctx.parent {
                     Some((_, parent)) => selectors.resolve_nesting(Some(parent)),
                     // At the top of `@scope`, `&` is the scoping root, which
@@ -719,7 +743,10 @@ impl<'s, 'a> Builder<'_, 's, 'a> {
                 };
                 let unresolved = resolved.is_none();
                 let selectors = resolved.unwrap_or(selectors);
-                let reasons = ctx.reasons.with_if(UnknownReason::Nested, unresolved);
+                let reasons = ctx
+                    .reasons
+                    .with_if(UnknownReason::Nested, unresolved)
+                    .with_if(UnknownReason::NarrowedIdent, narrowed);
                 self.style_rule(rule, selectors, &q.block.node, ctx, reasons);
             }
             Rule::At(at) => {
@@ -1462,5 +1489,27 @@ mod tests {
         // Equal specificity: the later rule wins, whichever bucket found it.
         let c = cascade(&[".x { width: 1px } p { width: 2px } .x { width: 3px }"]);
         assert_eq!(ask(&c, P_A, None, "width").1, "width: 3px");
+    }
+
+    /// A rule whose selector fails only through csswg-drafts#7129 is read
+    /// the old way and only possibly applies; one that fails in both
+    /// readings is dropped.
+    #[test]
+    fn narrowed_ident_selectors_only_possibly_apply() {
+        let c = cascade(&["p:not(.‣) { width: 1px }"]);
+        assert_eq!(
+            ask(&c, P_A, None, "width"),
+            (Match::Unknown, "width: 1px".into())
+        );
+        assert_eq!(reasons(&c, P_A, "width"), [UnknownReason::NarrowedIdent]);
+        // Nested rules come along, as possibly applied too.
+        let c = cascade(&["p:not(.‣) { & { width: 1px } }"]);
+        assert_eq!(reasons(&c, P_A, "width"), [UnknownReason::NarrowedIdent]);
+        // Not matched in the old reading either.
+        let c = cascade(&[".‣ { width: 1px }"]);
+        assert_eq!(ask(&c, P_A, None, "width").0, Match::No);
+        // Broken in both readings: dropped.
+        let c = cascade(&["p:not(.‣) . b, p { width: 1px }"]);
+        assert_eq!(ask(&c, P_A, None, "width").0, Match::No);
     }
 }

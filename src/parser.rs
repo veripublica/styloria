@@ -187,7 +187,7 @@ pub struct SyntaxError {
 /// | kind | top level | inside a block |
 /// |---|---|---|
 /// | [`BadString`](Self::BadString), [`BadUrl`](Self::BadUrl), [`InvalidUnicodeRange`](Self::InvalidUnicodeRange), [`UnterminatedBlock`](Self::UnterminatedBlock), [`NestingTooDeep`](Self::NestingTooDeep) | yes | yes |
-/// | [`InvalidSelector`](Self::InvalidSelector), [`InvalidSelectorStructure`](Self::InvalidSelectorStructure) | yes | yes |
+/// | [`InvalidSelector`](Self::InvalidSelector), [`InvalidSelectorStructure`](Self::InvalidSelectorStructure), [`UnknownPseudo`](Self::UnknownPseudo), [`NarrowedIdent`](Self::NarrowedIdent) | yes | yes |
 /// | [`UnterminatedRule`](Self::UnterminatedRule), [`DroppedCustomPropertyRule`](Self::DroppedCustomPropertyRule) | yes | never |
 /// | [`MalformedDeclaration`](Self::MalformedDeclaration), [`UnexpectedToken`](Self::UnexpectedToken) | never | yes |
 ///
@@ -253,6 +253,16 @@ pub enum SyntaxErrorKind {
     /// within one selector a token error wins, and otherwise the first of the
     /// two in source order is reported.
     UnknownPseudo,
+    /// A style rule's selector that fails only because a code point at or
+    /// above U+0080 stands alone as a delim, one the 2026 CRD took out of the
+    /// ident code points (`.‣`, `.a\u{A0}b`), and that parses with it as a
+    /// name code point, as before w3c/csswg-drafts#7129. The issue is open
+    /// again, and engines still read these as names, so whether a browser
+    /// drops the rule is not settled. Also reported where that old reading
+    /// cannot be rebuilt. The span is the selector's first such code point.
+    ///
+    /// Ranked as the error it stands for: a selector reports at most one.
+    NarrowedIdent,
     /// Block/function nesting past [`MAX_NESTING_DEPTH`]. The contents below
     /// that point are discarded rather than parsed, so this is reported
     /// once, at the outermost bracket that was refused.

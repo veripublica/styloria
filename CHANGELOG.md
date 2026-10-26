@@ -9,6 +9,27 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ## [Unreleased]
 
+### Changed
+
+The 2026 CSS Syntax CRD took some code points at or above U+0080 out of the
+ident code points (U+00A0, `‣`, `◰`, …), so they now stand alone as delims.
+w3c/csswg-drafts#7129 is open again, and engines still read them as names.
+Where that change alone decides, the answer is now Unknown rather than
+invalid. The tokenizer is unchanged: it follows the current text.
+
+- **Breaking:** `UnknownValue::NarrowedIdent`. A value that fails its
+  grammar, but fits when such code points are read as name code points
+  (`@counter-style { symbols: ‣ }`), is Unknown, not Invalid. A value whose
+  old reading fails too (`content: ‣`) stays Invalid; a shape the old
+  reading is not rebuilt for (`width: ‣1.5`) is Unknown.
+- **Breaking:** `SyntaxErrorKind::NarrowedIdent`. A style rule's selector
+  that fails only in the same way (`.‣`, `p:not(.a‣)`) reports this kind at
+  the code point, instead of `InvalidSelector`. One that fails in both
+  readings keeps its old error.
+- **Breaking:** `UnknownReason::NarrowedIdent`. The cascade no longer drops
+  such a rule. It reads the selector the old way, and the rule only possibly
+  applies.
+
 ## [0.16.1] - 2026-10-22
 
 Value checking follows the specifications where mdn-data's grammars lag

@@ -59,6 +59,7 @@
 
 use std::borrow::Cow;
 
+use crate::narrowed::Relaxed;
 use crate::parser::{BlockKind, ComponentValue, SyntaxError, SyntaxErrorKind};
 use crate::pseudos::{
     PSEUDO_CLASS_FUNCTIONS, PSEUDO_CLASSES, PSEUDO_ELEMENT_FUNCTIONS, PSEUDO_ELEMENTS,
@@ -601,7 +602,7 @@ fn substitute_simple<'a>(s: &SimpleSelector<'a>, with: &SimpleSelector<'a>) -> S
 pub fn parse_selector_list<'a>(
     prelude: &[Spanned<ComponentValue<'a>>],
 ) -> Result<SelectorList<'a>, Vec<SyntaxError>> {
-    into_result(list(prelude, false, 0, false))
+    into_result(rule_list(prelude, false))
 }
 
 /// [`parse_selector_list`] for a **relative** selector list (Selectors Level
@@ -611,7 +612,71 @@ pub fn parse_selector_list<'a>(
 pub fn parse_relative_selector_list<'a>(
     prelude: &[Spanned<ComponentValue<'a>>],
 ) -> Result<SelectorList<'a>, Vec<SyntaxError>> {
-    into_result(list(prelude, true, 0, false))
+    into_result(rule_list(prelude, true))
+}
+
+/// A style rule's selector list, its errors told apart: a selector that
+/// fails only because of a code point the 2026 CSS Syntax CRD took out of
+/// the ident code points, and parses with it as a name code point
+/// (w3c/csswg-drafts#7129), reports
+/// [`NarrowedIdent`](SyntaxErrorKind::NarrowedIdent) at that code point. So
+/// does one whose old reading cannot be rebuilt.
+fn rule_list<'a>(prelude: &Values<'a>, relative: bool) -> (SelectorList<'a>, Vec<SyntaxError>) {
+    let (selectors, mut errors) = list(prelude, relative, 0, false);
+    if errors.is_empty() {
+        return (selectors, errors);
+    }
+    let mut spots = Vec::new();
+    crate::narrowed::spots(prelude, &mut spots);
+    if spots.is_empty() {
+        return (selectors, errors);
+    }
+    let old_errors = match crate::narrowed::relax(prelude, crate::parser::MAX_NESTING_DEPTH) {
+        Relaxed::Same => return (selectors, errors),
+        Relaxed::Unsure => None,
+        Relaxed::Read(old) => Some(list(&old, relative, 0, false).1),
+    };
+    // Commas between selectors are where they were in either reading.
+    let commas: Vec<usize> = prelude
+        .iter()
+        .filter(|v| matches!(v.node, ComponentValue::Token(Token::Comma)))
+        .map(|v| v.span.start)
+        .collect();
+    let part = |at: usize| commas.partition_point(|&c| c < at);
+    // Per selector: its first such code point, and whether the old reading
+    // fails it too.
+    let mut first = vec![None; commas.len() + 1];
+    for s in spots.iter().rev() {
+        first[part(s.start)] = Some(*s);
+    }
+    let mut old_fails = vec![false; commas.len() + 1];
+    for o in old_errors.iter().flatten() {
+        old_fails[part(o.span.start)] = true;
+    }
+    for e in &mut errors {
+        let p = part(e.span.start);
+        if let Some(span) = first[p]
+            && (old_errors.is_none() || !old_fails[p])
+        {
+            *e = SyntaxError {
+                span,
+                kind: SyntaxErrorKind::NarrowedIdent,
+            };
+        }
+    }
+    (selectors, errors)
+}
+
+/// A style rule's selector list read as before w3c/csswg-drafts#7129, when
+/// that reading can be rebuilt and parses.
+pub(crate) fn parse_selector_list_before_7129<'a>(
+    prelude: &Values<'a>,
+    relative: bool,
+) -> Option<SelectorList<'a>> {
+    match crate::narrowed::relax(prelude, crate::parser::MAX_NESTING_DEPTH) {
+        Relaxed::Read(old) => into_result(list(&old, relative, 0, false)).ok(),
+        Relaxed::Same | Relaxed::Unsure => None,
+    }
 }
 
 /// Whether a prelude is certainly a valid selector list of the plainest
@@ -1559,6 +1624,7 @@ mod tests {
                     SyntaxErrorKind::InvalidSelector
                         | SyntaxErrorKind::InvalidSelectorStructure
                         | SyntaxErrorKind::UnknownPseudo
+                        | SyntaxErrorKind::NarrowedIdent
                 )
             })
             .collect()
@@ -2187,5 +2253,47 @@ mod tests {
         assert_eq!(list.selectors[0].node.leading, Some(Combinator::Child));
         assert!(parse_selector_list(r.node.prelude()).is_err());
         assert_eq!(sel_errors("p { > { } }"), 1, "a lone combinator");
+    }
+
+    /// A code point the 2026 CRD took out of the ident code points is a
+    /// delim now (csswg-drafts#7129, open): a selector that parses with it as
+    /// a name code point reports `NarrowedIdent` at it, not a token error.
+    #[test]
+    fn narrowed_ident_code_points_are_reported_apart() {
+        use SyntaxErrorKind::{InvalidSelector as T, NarrowedIdent as N};
+        for (css, want, span) in [
+            (".‣ { color: red }", vec![N], Some("‣")),
+            (".a\u{A0}b { color: red }", vec![N], Some("\u{A0}")),
+            ("#◰, [title=‣] { color: red }", vec![N, N], Some("◰")),
+            ("p:not(.x‣) { color: red }", vec![N], Some("‣")),
+            ("p { & .‣ { color: red } }", vec![N], Some("‣")),
+            // The old reading fails too: the token error stands.
+            (".‣ . b { color: red }", vec![T], Some(".")),
+            // Each selector its own.
+            (".‣, . b { color: red }", vec![N, T], Some("‣")),
+            // A name character in either reading: nothing to report.
+            (".çiğdem, .日本 { color: red }", vec![], None),
+        ] {
+            assert_eq!(kinds(css), want, "{css}");
+            if let Some(span) = span {
+                assert_eq!(syntax_errors(css)[0].span.slice(css), span, "{css}");
+            }
+        }
+        // Linear in the selectors: 20,000 of each kind, in one list.
+        let list: Vec<_> = (0..20_000)
+            .map(|i| {
+                if i % 2 == 0 {
+                    format!(".‣{i}")
+                } else {
+                    format!(".‣{i} .")
+                }
+            })
+            .collect();
+        let css = format!("{} {{}}", list.join(", "));
+        let start = std::time::Instant::now();
+        let k = kinds(&css);
+        assert!(start.elapsed().as_secs() < 2, "{:?}", start.elapsed());
+        assert_eq!(k.iter().filter(|k| **k == N).count(), 10_000);
+        assert_eq!(k.iter().filter(|k| **k == T).count(), 10_000);
     }
 }
