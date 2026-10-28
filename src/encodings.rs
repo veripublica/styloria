@@ -2,9 +2,9 @@
 // its encodings.json and single-byte index files (https://encoding.spec.whatwg.org/,
 // indexes dated 2024-09-18). Labels are sorted, for binary
 // search. A single-byte table maps bytes 0x80..=0xFF to code points, 0
-// where the byte is unmapped. Regenerated, not hand-maintained:
-// veripublica/styloria/gen/encodings.py.
-use crate::decode::Kind;
+// where the byte is unmapped. The multi-byte tables are in encodings_cjk.rs.
+// Regenerated, not hand-maintained: veripublica/styloria/gen/encodings.py.
+use crate::decode::{Cjk, Kind};
 
 pub(crate) const ENCODINGS: &[(&str, Kind)] = &[
     ("UTF-8", Kind::Utf8),
@@ -36,14 +36,14 @@ pub(crate) const ENCODINGS: &[(&str, Kind)] = &[
     ("windows-1257", Kind::SingleByte(&WINDOWS_1257)),
     ("windows-1258", Kind::SingleByte(&WINDOWS_1258)),
     ("x-mac-cyrillic", Kind::SingleByte(&X_MAC_CYRILLIC)),
-    ("GBK", Kind::Unsupported),
-    ("gb18030", Kind::Unsupported),
-    ("Big5", Kind::Unsupported),
-    ("EUC-JP", Kind::Unsupported),
-    ("ISO-2022-JP", Kind::Unsupported),
-    ("Shift_JIS", Kind::Unsupported),
-    ("EUC-KR", Kind::Unsupported),
-    ("replacement", Kind::Unsupported),
+    ("GBK", Kind::Cjk(Cjk::Gbk)),
+    ("gb18030", Kind::Cjk(Cjk::Gb18030)),
+    ("Big5", Kind::Cjk(Cjk::Big5)),
+    ("EUC-JP", Kind::Cjk(Cjk::EucJp)),
+    ("ISO-2022-JP", Kind::Cjk(Cjk::Iso2022Jp)),
+    ("Shift_JIS", Kind::Cjk(Cjk::ShiftJis)),
+    ("EUC-KR", Kind::Cjk(Cjk::EucKr)),
+    ("replacement", Kind::Replacement),
     ("UTF-16BE", Kind::Utf16Be),
     ("UTF-16LE", Kind::Utf16Le),
     ("x-user-defined", Kind::UserDefined),

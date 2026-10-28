@@ -24,9 +24,13 @@
 
 pub mod at_rule;
 pub mod cascade;
+#[cfg(feature = "legacy-cjk")]
+mod cjk;
 pub mod decode;
 mod descriptors;
 mod encodings;
+#[cfg(feature = "legacy-cjk")]
+mod encodings_cjk;
 mod known_properties;
 pub mod matching;
 mod narrowed;

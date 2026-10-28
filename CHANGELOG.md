@@ -9,6 +9,30 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ## [Unreleased]
 
+### Added
+
+- **The multi-byte legacy encodings**, behind a new `legacy-cjk` feature
+  (off by default): Shift_JIS, EUC-JP, ISO-2022-JP, GBK, gb18030, Big5 and
+  EUC-KR decode and encode as the Encoding Standard says, byte for byte,
+  from tables generated from its indexes (2024-09-18). They add about
+  300 KiB to a WebAssembly build, which is why they are optional. Without
+  the feature nothing changes: a stylesheet in one of them is still
+  `DecodeError::Unsupported`. With it, the same 7 encodings were checked
+  against encoding_rs: every 1- and 2-byte input, every 3-byte EUC-JP
+  input, every gb18030 4-byte shape, every code point, and random input,
+  with no difference.
+- **`replacement` decodes**, feature or not: any input but none becomes a
+  single U+FFFD, as the Encoding Standard and CSS Syntax say for labels
+  such as `iso-2022-kr` and `hz-gb-2312`. It used to be
+  `DecodeError::Unsupported`. It has no encoder, so `encode_stylesheet`
+  still gives `EncodeError::Unsupported`.
+
+`Decoded::lossless` now says what the round trip promise needs: every byte
+decoded, *and* none was one of two spellings of a character. Only the
+multi-byte encodings have such spellings (Shift_JIS's NEC and IBM rows, a
+redundant ISO-2022-JP escape, gb18030's 0x80), so nothing changes for the
+encodings supported before.
+
 ### Changed
 
 The 2026 CSS Syntax CRD took some code points at or above U+0080 out of the

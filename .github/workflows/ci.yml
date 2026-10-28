@@ -41,12 +41,19 @@ jobs:
       - name: Test
         run: cargo test --all-features
 
+      # Without `legacy-cjk` the multi-byte encodings are errors, and some
+      # tests check exactly that.
+      - name: Test (default features)
+        run: cargo test
+
       # styloria is what epubveri's CSS checks are built on, and epubveri
       # ships a WebAssembly package - so anything that compiles here but not
       # for wasm32 breaks a downstream release rather than this repo. Catch it
       # on the commit that causes it, not two repos later.
       - name: Build for wasm32
-        run: cargo build --lib --target wasm32-unknown-unknown
+        run: |
+          cargo build --lib --target wasm32-unknown-unknown
+          cargo build --lib --target wasm32-unknown-unknown --all-features
 
   # **The published MSRV, actually tested.** `rust-version` in Cargo.toml is a
   # promise on crates.io: cargo refuses to resolve a dependency that needs

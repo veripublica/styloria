@@ -8,13 +8,14 @@
 //! that decodes this way parses the same text from the same bytes, so spans
 //! agree between them.
 //!
-//! **Supported:** UTF-8, UTF-16BE, UTF-16LE and every single-byte encoding of
+//! **Supported:** UTF-8, UTF-16BE, UTF-16LE, every single-byte encoding of
 //! the Encoding Standard (windows-1252, ISO-8859-*, KOI8-*, …), from tables
-//! generated from its index files. The multi-byte legacy encodings
-//! (Shift_JIS, GBK, gb18030, Big5, EUC-JP, ISO-2022-JP, EUC-KR) and
-//! `replacement` are not: a stylesheet in one is an
-//! [`Unsupported`](DecodeError::Unsupported) error naming the label, never a
-//! guess.
+//! generated from its index files, and `replacement` (which only decodes).
+//! The multi-byte legacy encodings (Shift_JIS, GBK, gb18030, Big5, EUC-JP,
+//! ISO-2022-JP, EUC-KR) need the `legacy-cjk` feature, off by default, since
+//! their indexes add about 300 KiB to a WebAssembly build. Without it a stylesheet in one
+//! is an [`Unsupported`](DecodeError::Unsupported) error naming the label,
+//! never a guess.
 //!
 //! **Writing back.** [`encode_stylesheet`] turns text into bytes in the same
 //! encoding. When the decode was [`lossless`](Decoded::lossless), encoding the
@@ -55,7 +56,24 @@ pub(crate) enum Kind {
     SingleByte(&'static [u16; 128]),
     /// `x-user-defined`: 0x80..=0xFF to U+F780..=U+F7FF.
     UserDefined,
-    Unsupported,
+    /// A multi-byte encoding, supported with the `legacy-cjk` feature
+    /// (without it, only its name is used).
+    #[cfg_attr(not(feature = "legacy-cjk"), allow(dead_code))]
+    Cjk(Cjk),
+    /// Any input but none decodes to one U+FFFD; there is no encoder.
+    Replacement,
+}
+
+/// The multi-byte legacy encodings. GBK decodes as gb18030 does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Cjk {
+    Gbk,
+    Gb18030,
+    Big5,
+    EucJp,
+    Iso2022Jp,
+    ShiftJis,
+    EucKr,
 }
 
 impl Encoding {
@@ -82,9 +100,12 @@ impl Encoding {
         ENCODINGS[usize::from(self.0)].0
     }
 
-    /// Whether this crate decodes and encodes it.
+    /// Whether this crate decodes it, and encodes it unless it is
+    /// `replacement`, which the Encoding Standard gives no encoder. The
+    /// multi-byte legacy encodings are supported with the `legacy-cjk`
+    /// feature.
     pub fn is_supported(self) -> bool {
-        !matches!(self.kind(), Kind::Unsupported)
+        cfg!(feature = "legacy-cjk") || !matches!(self.kind(), Kind::Cjk(_))
     }
 
     fn kind(self) -> &'static Kind {
@@ -109,9 +130,12 @@ pub struct Decoded<'b> {
     /// Whether the bytes began with a byte order mark (UTF-8, UTF-16BE or
     /// UTF-16LE), which then decided the encoding.
     pub had_bom: bool,
-    /// Whether every byte decoded: no U+FFFD in [`text`](Self::text) stands
-    /// for malformed input. A U+FFFD written in the file itself does not
-    /// count.
+    /// Whether the text keeps everything the bytes said, so that encoding
+    /// it gives them back: every byte decoded (no U+FFFD in
+    /// [`text`](Self::text) stands for malformed input; one written in the
+    /// file itself does not count), and none was one of two spellings of a
+    /// character. Only the multi-byte encodings have such spellings:
+    /// Shift_JIS's NEC and IBM rows, a redundant ISO-2022-JP escape.
     pub lossless: bool,
 }
 
@@ -130,7 +154,7 @@ pub enum LabelSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecodeError {
     /// The label names an encoding this crate does not decode: a multi-byte
-    /// legacy encoding or `replacement`.
+    /// legacy encoding, without the `legacy-cjk` feature.
     Unsupported {
         /// The label as written, before trimming or lowercasing.
         label: String,
@@ -158,7 +182,8 @@ impl std::error::Error for DecodeError {}
 /// Why [`encode_stylesheet`] could not encode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EncodeError {
-    /// The encoding is not one this crate encodes.
+    /// The encoding is not one this crate encodes: `replacement`, or a
+    /// multi-byte legacy encoding without the `legacy-cjk` feature.
     Unsupported(Encoding),
     /// A character the encoding has no byte for, at this byte offset of the
     /// text.
@@ -284,8 +309,16 @@ fn decode_with(bytes: &[u8], encoding: Encoding, had_bom: bool) -> Decoded<'_> {
             }),
             true,
         ),
+        #[cfg(feature = "legacy-cjk")]
+        Kind::Cjk(cjk) => {
+            let (text, lossless) = crate::cjk::decode(bytes, *cjk);
+            (Cow::Owned(text), lossless)
+        }
         // `decode_stylesheet` turns these away first.
-        Kind::Unsupported => (String::from_utf8_lossy(bytes), false),
+        #[cfg(not(feature = "legacy-cjk"))]
+        Kind::Cjk(_) => (String::from_utf8_lossy(bytes), false),
+        Kind::Replacement if bytes.is_empty() => (Cow::Borrowed(""), true),
+        Kind::Replacement => (Cow::Borrowed("\u{FFFD}"), false),
     };
     Decoded {
         text,
@@ -320,7 +353,7 @@ fn single_byte(bytes: &[u8], mut high: impl FnMut(u8) -> char) -> Cow<'static, s
 }
 
 /// Encode text in `encoding`, with its byte order mark when `bom` is set
-/// (single-byte encodings have none, and ignore it). The inverse of
+/// (only UTF-8 and UTF-16 have one; the others ignore it). The inverse of
 /// [`decode_stylesheet`] for a lossless decode.
 pub fn encode_stylesheet(
     text: &str,
@@ -355,7 +388,11 @@ pub fn encode_stylesheet(
                 u8::try_from(0x80 + i).ok()
             })?;
         }
-        Kind::Unsupported => return Err(EncodeError::Unsupported(encoding)),
+        #[cfg(feature = "legacy-cjk")]
+        Kind::Cjk(cjk) => crate::cjk::encode(text, *cjk, &mut out)?,
+        #[cfg(not(feature = "legacy-cjk"))]
+        Kind::Cjk(_) => return Err(EncodeError::Unsupported(encoding)),
+        Kind::Replacement => return Err(EncodeError::Unsupported(encoding)),
     }
     Ok(out)
 }
@@ -405,8 +442,12 @@ mod tests {
         }
         assert_eq!(Encoding::for_label("utf-32"), None);
         assert_eq!(Encoding::for_label("utf 8"), None);
-        assert!(!Encoding::for_label("gbk").unwrap().is_supported());
-        assert!(!Encoding::for_label("iso-2022-kr").unwrap().is_supported());
+        assert_eq!(
+            Encoding::for_label("gbk").unwrap().is_supported(),
+            cfg!(feature = "legacy-cjk")
+        );
+        let kr = Encoding::for_label("iso-2022-kr").unwrap();
+        assert_eq!((kr.name(), kr.is_supported()), ("replacement", true));
     }
 
     #[test]
@@ -501,6 +542,20 @@ mod tests {
     }
 
     #[test]
+    fn replacement_decodes_to_one_replacement_character() {
+        // `iso-2022-kr` and the like name it, so that no byte gets through.
+        let d = decode_stylesheet(b"a { color: red }", Some("iso-2022-kr"), None).unwrap();
+        assert_eq!(d.encoding.name(), "replacement");
+        assert_eq!((d.text.as_ref(), d.lossless), ("\u{FFFD}", false));
+        let d = decode_stylesheet(b"", None, Some("hz-gb-2312")).unwrap();
+        assert_eq!((d.text.as_ref(), d.lossless), ("", true));
+        // A byte order mark still decides.
+        let d = decode_stylesheet(b"\xEF\xBB\xBFa{}", Some("iso-2022-kr"), None).unwrap();
+        assert_eq!(d.text, "a{}");
+    }
+
+    #[test]
+    #[cfg(not(feature = "legacy-cjk"))]
     fn unsupported_encodings_are_errors_naming_the_label() {
         let err = decode_stylesheet(b"@charset \"Shift_JIS\"; a{}", None, None).unwrap_err();
         assert_eq!(
@@ -532,7 +587,10 @@ mod tests {
         // Every byte of every supported single-byte encoding that maps.
         for (i, (name, _)) in ENCODINGS.iter().enumerate() {
             let enc = Encoding(u8::try_from(i).unwrap());
-            if !enc.is_supported() || matches!(enc.kind(), Kind::Utf16Be | Kind::Utf16Le) {
+            if !matches!(
+                enc.kind(),
+                Kind::Utf8 | Kind::SingleByte(_) | Kind::UserDefined
+            ) {
                 continue;
             }
             let bytes: Vec<u8> = (0..=255u8)
@@ -575,8 +633,13 @@ mod tests {
         );
         let sjis = Encoding::for_label("sjis").unwrap();
         assert_eq!(
-            encode_stylesheet("a", sjis, false),
-            Err(EncodeError::Unsupported(sjis))
+            encode_stylesheet("a", sjis, false).is_ok(),
+            cfg!(feature = "legacy-cjk")
+        );
+        let replacement = Encoding::for_label("replacement").unwrap();
+        assert_eq!(
+            encode_stylesheet("", replacement, false),
+            Err(EncodeError::Unsupported(replacement))
         );
         let user = Encoding::for_label("x-user-defined").unwrap();
         let d = decode_stylesheet(b"a\x80\xFF", Some("x-user-defined"), None).unwrap();

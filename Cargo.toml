@@ -11,6 +11,15 @@ readme = "README.md"
 keywords = ["css", "css3", "parser", "selectors", "validation"]
 categories = ["parser-implementations", "web-programming"]
 
+[features]
+# The multi-byte legacy encodings of the Encoding Standard (Shift_JIS, EUC-JP,
+# ISO-2022-JP, GBK, gb18030, Big5, EUC-KR). Off by default: their indexes are
+# large, and EPUB, the main consumer's format, allows only UTF-8 and UTF-16.
+legacy-cjk = []
+
+[package.metadata.docs.rs]
+all-features = true
+
 [lib]
 name = "styloria"
 path = "src/lib.rs"
