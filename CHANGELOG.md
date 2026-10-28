@@ -7,7 +7,7 @@ styloria is pre-1.0, so new features and breaking changes both land as
 minor-version bumps (`0.x.0`), per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
-## [Unreleased]
+## [0.17.0] - 2026-10-28
 
 ### Added
 
@@ -63,6 +63,12 @@ a name ending at an exponent's sign (`‣1e+3`).
   gives the references of both readings: one found in only one of them
   (`#◰` names the id `◰` only before #7129), or in a rule dropped in only
   one, is marked. `dropped` now means dropped in both.
+
+The `NarrowedIdent` variants (`UnknownValue`, `SyntaxErrorKind` and
+`UnknownReason`) and the `narrowed_ident` field of `SelectorReference` track
+w3c/csswg-drafts#7129, which is open. They may change or be removed once the
+CSS WG decides, in a further breaking release, so do not build on them as
+settled API.
 
 ## [0.16.1] - 2026-10-22
 
