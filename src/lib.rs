@@ -55,7 +55,7 @@ pub use at_rule::{
 };
 pub use cascade::{
     Candidate, Cascade, ElementStyle, MAX_IMPORT_DEPTH, PropertyAnswer, Setter, Sheet,
-    UnknownReason, UnknownReasons,
+    StyleComparer, StyleComparison, StyleDifference, UnknownReason, UnknownReasons,
 };
 pub use decode::{
     DecodeError, Decoded, EncodeError, Encoding, LabelSource, charset_rule, decode_stylesheet,

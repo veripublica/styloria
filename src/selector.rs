@@ -359,6 +359,32 @@ impl ComplexSelector<'_> {
             .map(|s| s.node.specificity())
             .fold(Specificity::default(), Specificity::add)
     }
+
+    /// The pseudo-element this selector styles, `None` if it styles the
+    /// element itself: lowercase, without colons (`before`, for `::BEFORE`
+    /// and `:before` alike), a chain joined by `::` (`before::marker`), a
+    /// functional one with its arguments as written (`part(x)`).
+    pub fn pseudo_element(&self) -> Option<String> {
+        let mut name: Option<String> = None;
+        for s in &self.compounds.last()?.node.simples {
+            if let SimpleSelector::PseudoElement(p) = &s.node {
+                let name = match &mut name {
+                    Some(n) => {
+                        n.push_str("::");
+                        n
+                    }
+                    none => none.insert(String::new()),
+                };
+                name.push_str(&p.name.to_ascii_lowercase());
+                if let Some(args) = &p.args {
+                    name.push('(');
+                    crate::serialize::serialize_values(args, name);
+                    name.push(')');
+                }
+            }
+        }
+        name
+    }
 }
 
 impl SimpleSelector<'_> {

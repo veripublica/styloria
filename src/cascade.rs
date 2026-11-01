@@ -73,6 +73,14 @@
 //! let width = style.property("width");
 //! let decl = &width.decided_by().unwrap().candidate.declaration;
 //! assert_eq!(decl.node.name_span.start_line_col(css), (2, 22));
+//!
+//! // Does a change reach this element? A property no browser knows does not.
+//! let fixed = styloria::parse_stylesheet(".pic { border: 1px solid; colr: red }").0;
+//! let fixed = Cascade::new(&[Sheet { stylesheet: &fixed, conditional: false }]);
+//! let compare = cascade.compare_to(&fixed);
+//! let result = compare.element(&Img, None, &Img, None);
+//! assert_eq!(result.status, Match::Unknown); // the @media rule is gone
+//! assert_eq!(result.differences[0].property, "width");
 //! ```
 //!
 //! `@import` is followed when the caller hands over the imported sheets
@@ -83,6 +91,28 @@
 //! ([`check_declaration`] says
 //! [`Invalid`](crate::ValueCheck::Invalid)) is dropped, as a browser drops
 //! it: `width: banana` sets nothing. One whose value is Unknown stays.
+//!
+//! A pseudo-element's box has a cascade of its own:
+//! [`Cascade::pseudo_elements_for`] names the ones rules could style on an
+//! element, and [`Cascade::style_for_pseudo`] answers for one of them.
+//!
+//! **Comparing two states.** [`Cascade::compare_to`] asks whether a change to
+//! a document's stylesheets, or to the document, changes what an element gets.
+//! `Yes` for every element of a document means the same cascaded values, so the
+//! same computed values, since what is inherited is the same too. That holds
+//! as far as the comparison can see; it reads values as written and does not
+//! normalize them:
+//!
+//! - `No` is a difference *as written*: `red` and `#f00` differ, and so does
+//!   `url(missing.png)` and `none`, though both may draw the same thing.
+//! - A `url()` is compared as text, so moving a sheet to another folder is not
+//!   seen.
+//! - The condition behind [`Sheet::conditional`] is the caller's, and is not
+//!   compared: keep it the same in both states, or do not ask.
+//! - Rules that style no element (`@font-face`, `@keyframes`, `@page`, …) are
+//!   compared as text for the document as a whole
+//!   ([`StyleComparer::differing_at_rules`]). A difference among them turns
+//!   every `Yes` into `Unknown`.
 //!
 //! **Out of scope:** user-agent and user styles, and inheritance, are not
 //! modelled.
@@ -98,10 +128,12 @@ use crate::selector::{
     BeforeNarrowing, SelectorList, SimpleSelector, Specificity, parse_relative_selector_list,
     parse_selector_list, selector_list_before_7129,
 };
+use crate::serialize::{serialize_block_contents, serialize_rule, serialize_values};
 use crate::span::Spanned;
 use crate::token::Token;
-use crate::values::{ValueCheck, check_declaration};
-use std::collections::HashMap;
+use crate::values::{UnknownValue, ValueCheck, check_declaration};
+use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 
 /// One stylesheet given to the cascade.
 #[derive(Debug, Clone, Copy)]
@@ -210,6 +242,40 @@ pub struct Cascade<'s, 'a> {
     /// For each layer, its place in the layer order; see `Layers`.
     layer_rank: Vec<u32>,
     unlayered: usize,
+    /// Every sheet walked, imported ones included, in order.
+    sheets: Vec<WalkedSheet<'s, 'a>>,
+}
+
+#[derive(Debug)]
+struct WalkedSheet<'s, 'a> {
+    stylesheet: &'s Stylesheet<'a>,
+    reasons: UnknownReasons,
+    conditions: Conditions<'s>,
+}
+
+/// What a rule sits inside: the group rules, `@import`s and parent style rules
+/// around it, innermost first. Shared, since a deep nest of group rules holds
+/// many rules and each must not copy the chain.
+type Conditions<'s> = Option<Arc<Condition<'s>>>;
+
+#[derive(Debug)]
+struct Condition<'s> {
+    rule: &'s Spanned<Rule<'s>>,
+    outer: Conditions<'s>,
+}
+
+impl Drop for Condition<'_> {
+    /// Iteratively: the chain is as deep as the rules allow, and a deep chain
+    /// dropped by recursion would be a stack overflow.
+    fn drop(&mut self) {
+        let mut next = self.outer.take();
+        while let Some(arc) = next {
+            match Arc::try_unwrap(arc) {
+                Ok(mut c) => next = c.outer.take(),
+                Err(_) => break,
+            }
+        }
+    }
 }
 
 /// A style rule, ready to match: its parsed selectors and its declarations.
@@ -226,6 +292,7 @@ struct CascadeRule<'s, 'a> {
     sheet: usize,
     layer: usize,
     reasons: UnknownReasons,
+    conditions: Conditions<'s>,
 }
 
 /// The rules each element is worth trying, as a browser finds them: by the
@@ -241,6 +308,8 @@ struct RuleIndex {
     /// and matching sorts out the rest.
     names: HashMap<String, Vec<u32>>,
     always: Vec<u32>,
+    /// The rules with a selector for a pseudo-element, in order.
+    pseudo: Vec<u32>,
 }
 
 /// What a subject compound requires of the element.
@@ -262,8 +331,15 @@ impl RuleIndex {
         for (r, rule) in rules.iter().enumerate() {
             let r = u32::try_from(r).unwrap_or(u32::MAX);
             let mut always = false;
+            let mut pseudo = false;
             let old = rule.before_7129.iter().flat_map(|l| &l.selectors);
             for s in rule.selectors.selectors.iter().chain(old) {
+                pseudo |= s.node.compounds.last().is_some_and(|c| {
+                    c.node
+                        .simples
+                        .iter()
+                        .any(|s| matches!(s.node, SimpleSelector::PseudoElement(_)))
+                });
                 let subject = s.node.compounds.last().map(|c| &c.node.simples);
                 match subject.and_then(|simples| key(simples)) {
                     Some(Key::Id(v)) => add(&mut index.ids, v.to_string(), r),
@@ -274,6 +350,9 @@ impl RuleIndex {
             }
             if always {
                 index.always.push(r);
+            }
+            if pseudo {
+                index.pseudo.push(r);
             }
         }
         index
@@ -341,6 +420,7 @@ pub struct Candidate<'e> {
     /// Why it only possibly applies; empty when it certainly does.
     pub reasons: UnknownReasons,
     key: (bool, bool, u32, Specificity, u32),
+    conditions: Option<&'e Condition<'e>>,
 }
 
 /// Every declaration that could apply to one element, highest precedence
@@ -414,11 +494,12 @@ impl<'s, 'a> Cascade<'s, 'a> {
             namespaces: Vec::with_capacity(sheets.len()),
             import: &mut import,
             importing: Vec::new(),
+            sheets: Vec::with_capacity(sheets.len()),
         };
         for sheet in sheets {
             let reasons = UnknownReasons::default()
                 .with_if(UnknownReason::ConditionalSheet, sheet.conditional);
-            b.sheet(sheet.stylesheet, Layers::ROOT, reasons);
+            b.sheet(sheet.stylesheet, Layers::ROOT, reasons, None);
         }
         let layer_rank = b.layers.ranks();
         Cascade {
@@ -427,6 +508,7 @@ impl<'s, 'a> Cascade<'s, 'a> {
             namespaces: b.namespaces,
             unlayered: layer_rank.len() - 1,
             layer_rank,
+            sheets: b.sheets,
         }
     }
 
@@ -444,15 +526,124 @@ impl<'s, 'a> Cascade<'s, 'a> {
         's: 'e,
         'a: 'e,
     {
+        let mut candidates = self.rule_candidates(&self.index.rules_for(element), element, None);
+        for (i, item) in inline.unwrap_or_default().iter().enumerate() {
+            if let BlockItem::Declaration(d) = item
+                && check_declaration(&d.node) != ValueCheck::Invalid
+            {
+                let order = u32::try_from(i).unwrap_or(u32::MAX);
+                candidates.push(Candidate {
+                    declaration: d,
+                    rule: None,
+                    specificity: Specificity::default(),
+                    reasons: UnknownReasons::default(),
+                    key: self.key(
+                        d.node.important,
+                        true,
+                        self.unlayered,
+                        Specificity::default(),
+                        order,
+                    ),
+                    conditions: None,
+                });
+            }
+        }
+        candidates.sort_by_key(|c| std::cmp::Reverse(c.key));
+        ElementStyle { candidates }
+    }
+
+    /// Every declaration that could apply to the pseudo-element `pseudo` of
+    /// `element`, highest precedence first. The name is compared as
+    /// [`ComplexSelector::pseudo_element`](crate::ComplexSelector::pseudo_element)
+    /// gives it, with or without its colons. A `style` attribute styles the
+    /// element, not its pseudo-elements, so there is none to give.
+    pub fn style_for_pseudo<'e, E: Element>(&'e self, element: &E, pseudo: &str) -> ElementStyle<'e>
+    where
+        's: 'e,
+        'a: 'e,
+    {
+        let pseudo = crate::matching::pseudo_name(pseudo);
+        let mut candidates = self.rule_candidates(&self.index.pseudo, element, Some(&pseudo));
+        candidates.sort_by_key(|c| std::cmp::Reverse(c.key));
+        ElementStyle { candidates }
+    }
+
+    /// The pseudo-elements of `element` some rule could style, sorted, with
+    /// names as [`style_for_pseudo`](Self::style_for_pseudo) takes them.
+    pub fn pseudo_elements_for<E: Element>(&self, element: &E) -> Vec<String> {
+        let mut out = BTreeSet::new();
+        for &r in &self.index.pseudo {
+            let r = &self.rules[r as usize];
+            let ns = &self.namespaces[r.sheet];
+            let old = r.before_7129.iter().flat_map(|l| &l.selectors);
+            for s in r.selectors.selectors.iter().chain(old) {
+                if let Some(name) = s.node.pseudo_element()
+                    && !out.contains(&name)
+                    && s.node.matches_pseudo(element, ns, &name) != Match::No
+                {
+                    out.insert(name);
+                }
+            }
+        }
+        out.into_iter().collect()
+    }
+
+    /// Compare this state of a document with another:
+    /// [`StyleComparer::element`] answers per element. See the
+    /// [module documentation](self) for what the answer covers.
+    pub fn compare_to<'c, 't, 'b>(
+        &'c self,
+        after: &'c Cascade<'t, 'b>,
+    ) -> StyleComparer<'c, 's, 'a, 't, 'b> {
+        let (x, y) = (self.other_rules(), after.other_rules());
+        let (only_x, only_y) = (differing(&x, &y), differing(&y, &x));
+        let mut differing_at_rules: Vec<String> = only_x.into_iter().chain(only_y).collect();
+        differing_at_rules.sort();
+        differing_at_rules.dedup();
+        StyleComparer {
+            before: self,
+            after,
+            differing_at_rules,
+        }
+    }
+
+    /// The rules that style no element, in order, as text with what they sit
+    /// inside.
+    fn other_rules(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for s in &self.sheets {
+            let mut around = condition_text(s.conditions.as_deref());
+            around.push_str(&format!("{:?} ", s.reasons));
+            let rules: Vec<_> = s.stylesheet.rules.iter().collect();
+            other_rules(&rules, &around, &mut out);
+        }
+        out
+    }
+
+    /// The declarations of the rules listed, as they apply to `element` or,
+    /// given `pseudo`, to that pseudo-element of it. Unsorted.
+    fn rule_candidates<'e, E: Element>(
+        &'e self,
+        rules: &[u32],
+        element: &E,
+        pseudo: Option<&str>,
+    ) -> Vec<Candidate<'e>>
+    where
+        's: 'e,
+        'a: 'e,
+    {
         let mut candidates = Vec::new();
-        for r in self.index.rules_for(element) {
+        for &r in rules {
             let r = &self.rules[r as usize];
             let ns = &self.namespaces[r.sheet];
             let best_of = |list: &SelectorList<'a>| {
                 let mut best = Match::No;
                 let mut specificity = Specificity::default();
                 for s in &list.selectors {
-                    let m = s.node.matches(element, ns);
+                    let m = match pseudo {
+                        Some(p) => s.node.matches_pseudo(element, ns, p),
+                        None => s.node.matches(element, ns),
+                    };
                     if m != Match::No {
                         best = best.or(m);
                         specificity = specificity.max(s.node.specificity());
@@ -493,31 +684,11 @@ impl<'s, 'a> Cascade<'s, 'a> {
                     specificity,
                     reasons,
                     key: self.key(d.node.important, false, r.layer, specificity, *order),
+                    conditions: r.conditions.as_deref(),
                 });
             }
         }
-        for (i, item) in inline.unwrap_or_default().iter().enumerate() {
-            if let BlockItem::Declaration(d) = item
-                && check_declaration(&d.node) != ValueCheck::Invalid
-            {
-                let order = u32::try_from(i).unwrap_or(u32::MAX);
-                candidates.push(Candidate {
-                    declaration: d,
-                    rule: None,
-                    specificity: Specificity::default(),
-                    reasons: UnknownReasons::default(),
-                    key: self.key(
-                        d.node.important,
-                        true,
-                        self.unlayered,
-                        Specificity::default(),
-                        order,
-                    ),
-                });
-            }
-        }
-        candidates.sort_by_key(|c| std::cmp::Reverse(c.key));
-        ElementStyle { candidates }
+        candidates
     }
 
     /// The precedence of a declaration, compared highest-wins: importance,
@@ -564,6 +735,287 @@ impl<'e> ElementStyle<'e> {
             Match::Unknown
         };
         PropertyAnswer { status, setters }
+    }
+}
+
+/// One state of a document compared with another; made by
+/// [`Cascade::compare_to`].
+#[derive(Debug)]
+pub struct StyleComparer<'c, 's, 'a, 't, 'b> {
+    before: &'c Cascade<'s, 'a>,
+    after: &'c Cascade<'t, 'b>,
+    /// The rules that style no element (`@font-face`, `@keyframes`, `@page`,
+    /// an unknown at-rule) and are in only one of the states, as text, sorted.
+    /// Not empty: every [`Match::Yes`] becomes [`Match::Unknown`], since the
+    /// comparison of elements cannot see what such a rule does.
+    pub differing_at_rules: Vec<String>,
+}
+
+/// What a change does to one element and its pseudo-elements.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StyleComparison {
+    /// `Yes`: the same as far as the comparison sees. `No`: some property
+    /// certainly differs as written. `Unknown`: neither can be said.
+    pub status: Match,
+    /// The properties that are not the same, sorted, longhands where the
+    /// declaration is a shorthand.
+    pub differences: Vec<StyleDifference>,
+}
+
+/// One property that is not the same in both states.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StyleDifference {
+    /// The pseudo-element, as [`Cascade::style_for_pseudo`] takes it; `None`
+    /// for the element itself.
+    pub pseudo: Option<String>,
+    pub property: String,
+    /// `No` or `Unknown`, as [`StyleComparison::status`].
+    pub status: Match,
+    /// Why it is `Unknown`, when a declaration only possibly applies. Empty
+    /// for `No`, and for two certain winners that cannot be told apart by
+    /// reading them (`margin: 0` and `margin-left: 0`).
+    pub reasons: UnknownReasons,
+}
+
+impl StyleComparer<'_, '_, '_, '_, '_> {
+    /// Compare `before_element` in the first state with `after_element` in
+    /// the second, which the caller knows to be the same element. Their `style`
+    /// attributes are read as [`Cascade::style_for`] reads them.
+    pub fn element<A: Element, B: Element>(
+        &self,
+        before_element: &A,
+        before_inline: Option<&[BlockItem<'_>]>,
+        after_element: &B,
+        after_inline: Option<&[BlockItem<'_>]>,
+    ) -> StyleComparison {
+        let mut differences = Vec::new();
+        let x = self.before.style_for(before_element, before_inline);
+        let y = self.after.style_for(after_element, after_inline);
+        compare_styles(&x, &y, None, &mut differences);
+        let mut pseudos = self.before.pseudo_elements_for(before_element);
+        pseudos.extend(self.after.pseudo_elements_for(after_element));
+        pseudos.sort();
+        pseudos.dedup();
+        for p in pseudos {
+            let x = self.before.style_for_pseudo(before_element, &p);
+            let y = self.after.style_for_pseudo(after_element, &p);
+            compare_styles(&x, &y, Some(&p), &mut differences);
+        }
+        let status = if differences.iter().any(|d| d.status == Match::No) {
+            Match::No
+        } else if !differences.is_empty() || !self.differing_at_rules.is_empty() {
+            Match::Unknown
+        } else {
+            Match::Yes
+        };
+        StyleComparison {
+            status,
+            differences,
+        }
+    }
+}
+
+/// The properties two sets of candidates could set, each by its own name, a
+/// shorthand by its longhands, a prefixed name by the name it stands for. A
+/// property no specification or browser data knows sets nothing, and is left
+/// out.
+fn asked_properties(style: &ElementStyle<'_>, names: &mut BTreeSet<String>) {
+    for c in &style.candidates {
+        let d = &c.declaration.node;
+        if d.name.starts_with("--") {
+            names.insert(d.name.to_string());
+            continue;
+        }
+        if check_declaration(d) == ValueCheck::Unknown(UnknownValue::UnknownProperty) {
+            continue;
+        }
+        let lower = d.name.to_ascii_lowercase();
+        let name = if lower.starts_with('-') && longhands(&lower).is_none() {
+            parser::unprefixed(&lower)
+        } else {
+            lower.as_str()
+        };
+        match longhands(name) {
+            Some(l) => names.extend(l.iter().map(|n| n.to_string())),
+            None => {
+                names.insert(name.to_string());
+            }
+        }
+    }
+}
+
+/// A setter as the comparison sees it. An uncertain one is the same only under
+/// the same conditions, so what it sits inside counts too.
+fn setter_key(s: &Setter<'_, '_>) -> String {
+    let d = &s.candidate.declaration.node;
+    let mut key = d.name.to_ascii_lowercase();
+    key.push(':');
+    serialize_values(&d.value, &mut key);
+    if !s.reasons.is_empty() {
+        key.push_str(&format!(" {:?} ", s.reasons));
+        if let Some(r) = s.candidate.rule {
+            rule_head(r, &mut key);
+        }
+        key.push_str(&condition_text(s.candidate.conditions));
+    }
+    key
+}
+
+fn rule_head(rule: &Spanned<Rule<'_>>, out: &mut String) {
+    if let Rule::At(a) = &rule.node {
+        out.push('@');
+        out.push_str(&a.name.to_ascii_lowercase());
+        out.push(' ');
+    }
+    // The whitespace at its ends is the block's and the name's, not the
+    // prelude's: `a {` and `a{` are one rule.
+    let mut prelude = rule.node.prelude();
+    let is_space = |v: &Spanned<ComponentValue<'_>>| {
+        matches!(v.node, ComponentValue::Token(Token::Whitespace))
+    };
+    while let [first, rest @ ..] = prelude
+        && is_space(first)
+    {
+        prelude = rest;
+    }
+    while let [rest @ .., last] = prelude
+        && is_space(last)
+    {
+        prelude = rest;
+    }
+    serialize_values(prelude, out);
+    out.push_str(" / ");
+}
+
+fn condition_text(mut c: Option<&Condition<'_>>) -> String {
+    let mut out = String::new();
+    while let Some(here) = c {
+        rule_head(here.rule, &mut out);
+        c = here.outer.as_deref();
+    }
+    out
+}
+
+/// The setters that could win: down to the first certain one.
+fn could_win<'p, 'c, 'e>(answer: &'p PropertyAnswer<'c, 'e>) -> &'p [Setter<'c, 'e>] {
+    let end = answer
+        .setters
+        .iter()
+        .position(|s| s.reasons.is_empty())
+        .map_or(answer.setters.len(), |i| i + 1);
+    &answer.setters[..end]
+}
+
+/// `inherit`, `initial` and the like, which may give what no declaration gives.
+fn is_css_wide(d: &Declaration<'_>) -> bool {
+    let mut text = String::new();
+    serialize_values(&d.value, &mut text);
+    ["inherit", "initial", "unset", "revert", "revert-layer"]
+        .iter()
+        .any(|k| text.eq_ignore_ascii_case(k))
+}
+
+fn compare_styles(
+    x: &ElementStyle<'_>,
+    y: &ElementStyle<'_>,
+    pseudo: Option<&str>,
+    out: &mut Vec<StyleDifference>,
+) {
+    let mut names = BTreeSet::new();
+    asked_properties(x, &mut names);
+    asked_properties(y, &mut names);
+    for property in names {
+        let (a, b) = (x.property(&property), y.property(&property));
+        let (a, b) = (could_win(&a), could_win(&b));
+        if a.len() == b.len() && a.iter().zip(b).all(|(p, q)| setter_key(p) == setter_key(q)) {
+            continue;
+        }
+        let reasons = a.iter().chain(b).fold(UnknownReasons::default(), |r, s| {
+            UnknownReasons(r.0 | s.reasons.0)
+        });
+        let name = |s: &Setter<'_, '_>| s.candidate.declaration.node.name.to_ascii_lowercase();
+        let certain = match (a.first(), b.first()) {
+            (Some(p), Some(q)) if p.reasons.is_empty() && q.reasons.is_empty() => {
+                name(p) == name(q)
+            }
+            (Some(s), None) | (None, Some(s)) if s.reasons.is_empty() => {
+                !is_css_wide(&s.candidate.declaration.node)
+            }
+            _ => false,
+        };
+        out.push(StyleDifference {
+            pseudo: pseudo.map(str::to_string),
+            property,
+            status: if certain { Match::No } else { Match::Unknown },
+            reasons: if certain {
+                UnknownReasons::default()
+            } else {
+                reasons
+            },
+        });
+    }
+}
+
+/// The rules among `rules` that style no element, with what surrounds them.
+/// The first string is what tells it apart, the second what to show.
+fn other_rules(rules: &[&Spanned<Rule<'_>>], around: &str, out: &mut Vec<(String, String)>) {
+    for r in rules {
+        let Rule::At(at) = &r.node else { continue };
+        let bare = parser::unprefixed(&at.name);
+        let plain = ["charset", "import", "namespace", "layer"]
+            .iter()
+            .any(|n| bare.eq_ignore_ascii_case(n));
+        if at.block.is_none() && plain {
+            continue;
+        }
+        if let Some(block) = &at.block
+            && (bare.eq_ignore_ascii_case("layer") || parser::holds_style_rules(bare))
+        {
+            let mut inner = around.to_string();
+            rule_head(r, &mut inner);
+            let nested: Vec<_> = block
+                .node
+                .iter()
+                .filter_map(|i| match i {
+                    BlockItem::Rule(r) => Some(r),
+                    BlockItem::Declaration(_) => None,
+                })
+                .collect();
+            other_rules(&nested, &inner, out);
+            continue;
+        }
+        let mut key = around.to_string();
+        rule_head(r, &mut key);
+        if let Some(block) = &at.block {
+            key.push_str(&serialize_block_contents(&block.node));
+        }
+        let mut text = String::new();
+        serialize_rule(&r.node, &mut text);
+        out.push((key, text));
+    }
+}
+
+/// What `x` holds that `y` does not, or holds in another order: rules that
+/// style no element can depend on their order (the later `@font-face` wins).
+fn differing(x: &[(String, String)], y: &[(String, String)]) -> Vec<String> {
+    if x.len() == y.len() && x.iter().zip(y).all(|(p, q)| p.0 == q.0) {
+        return Vec::new();
+    }
+    let keys: BTreeSet<&str> = y.iter().map(|q| q.0.as_str()).collect();
+    let only: Vec<String> = x
+        .iter()
+        .filter(|p| !keys.contains(p.0.as_str()))
+        .map(|p| p.1.clone())
+        .collect();
+    if only.is_empty() {
+        // The same rules, in another order.
+        x.iter()
+            .zip(y)
+            .filter(|(p, q)| p.0 != q.0)
+            .map(|(p, _)| p.1.clone())
+            .collect()
+    } else {
+        only
     }
 }
 
@@ -667,6 +1119,7 @@ struct Builder<'f, 's, 'a> {
     import: &'f mut ImportFn<'f, 's, 'a>,
     /// The sheets being walked, outermost first: the import chain.
     importing: Vec<&'s Stylesheet<'a>>,
+    sheets: Vec<WalkedSheet<'s, 'a>>,
 }
 
 /// Where in the sheets a rule sits.
@@ -684,11 +1137,25 @@ struct Ctx<'p, 's, 'a> {
     )>,
     /// Inside `@scope`, where `&` at the top stands for the scoping root.
     scoped: bool,
+    conditions: Conditions<'s>,
+}
+
+fn around<'s>(rule: &'s Spanned<Rule<'s>>, outer: &Conditions<'s>) -> Conditions<'s> {
+    Some(Arc::new(Condition {
+        rule,
+        outer: outer.clone(),
+    }))
 }
 
 impl<'s, 'a> Builder<'_, 's, 'a> {
     /// A whole sheet, its imports in their place.
-    fn sheet(&mut self, sheet: &'s Stylesheet<'a>, layer: usize, reasons: UnknownReasons) {
+    fn sheet(
+        &mut self,
+        sheet: &'s Stylesheet<'a>,
+        layer: usize,
+        reasons: UnknownReasons,
+        conditions: Conditions<'s>,
+    ) {
         if self.importing.len() > MAX_IMPORT_DEPTH
             || self.importing.iter().any(|s| std::ptr::eq(*s, sheet))
         {
@@ -700,7 +1167,13 @@ impl<'s, 'a> Builder<'_, 's, 'a> {
             reasons,
             parent: None,
             scoped: false,
+            conditions: conditions.clone(),
         };
+        self.sheets.push(WalkedSheet {
+            stylesheet: sheet,
+            reasons,
+            conditions,
+        });
         self.namespaces.push(Namespaces::from_stylesheet(sheet));
         self.importing.push(sheet);
         // A misplaced `@import` or `@namespace` is ignored, as a browser does.
@@ -709,7 +1182,7 @@ impl<'s, 'a> Builder<'_, 's, 'a> {
                 && at.name.eq_ignore_ascii_case("import")
             {
                 if place == Placement::InOrder {
-                    self.import(sheet, at, &ctx);
+                    self.import(sheet, rule, at, &ctx);
                 }
                 continue;
             }
@@ -718,7 +1191,13 @@ impl<'s, 'a> Builder<'_, 's, 'a> {
         self.importing.pop();
     }
 
-    fn import(&mut self, from: &'s Stylesheet<'a>, at: &AtRule<'a>, ctx: &Ctx<'_, 's, 'a>) {
+    fn import(
+        &mut self,
+        from: &'s Stylesheet<'a>,
+        written: &'s Spanned<Rule<'a>>,
+        at: &AtRule<'a>,
+        ctx: &Ctx<'_, 's, 'a>,
+    ) {
         let Some(rule) = parse_import_rule(&at.prelude) else {
             return;
         };
@@ -740,7 +1219,7 @@ impl<'s, 'a> Builder<'_, 's, 'a> {
         }
         let conditional = rule.supports.is_some() || !rule.media.always_holds();
         let reasons = ctx.reasons.with_if(UnknownReason::Conditional, conditional);
-        self.sheet(sheet, layer, reasons);
+        self.sheet(sheet, layer, reasons, around(written, &ctx.conditions));
     }
 
     fn rule(&mut self, rule: &'s Spanned<Rule<'a>>, ctx: &Ctx<'_, 's, 'a>) {
@@ -846,6 +1325,7 @@ impl<'s, 'a> Builder<'_, 's, 'a> {
                     reasons: ctx.reasons.with_if(UnknownReason::Conditional, conditional),
                     parent: ctx.parent,
                     scoped: ctx.scoped || bare.eq_ignore_ascii_case("scope"),
+                    conditions: around(rule, &ctx.conditions),
                 };
                 match inner.parent {
                     // Inside a style rule, a group rule's own declarations
@@ -887,6 +1367,7 @@ impl<'s, 'a> Builder<'_, 's, 'a> {
             reasons,
             parent: Some((rule, &selectors, before_7129.as_ref())),
             scoped: ctx.scoped,
+            conditions: around(rule, &ctx.conditions),
         };
         // Each run of declarations becomes a rule of its own; their
         // selectors are filled in at the end, so children can borrow them
@@ -907,6 +1388,7 @@ impl<'s, 'a> Builder<'_, 's, 'a> {
                             sheet: ctx.sheet,
                             layer: ctx.layer,
                             reasons,
+                            conditions: ctx.conditions.clone(),
                         });
                         runs.push(self.rules.len() - 1);
                         self.rules.len() - 1
@@ -1313,6 +1795,273 @@ mod tests {
         // Rules in at-rules that style nothing are not candidates.
         let c = cascade(&["@font-face { width: 1px } @page { width: 1px }"]);
         assert_eq!(ask(&c, IMG, None, "width").0, Match::No);
+    }
+
+    #[test]
+    fn a_pseudo_element_has_its_own_candidates() {
+        let c = cascade(&[
+            "img[width]::before { content: 'x' } img:before { color: red } \
+             p::before { color: blue } img { width: 1px }",
+        ]);
+        assert_eq!(c.pseudo_elements_for(&IMG), ["before"]);
+        let names = |style: ElementStyle<'_>| -> Vec<String> {
+            let c = style.candidates.iter();
+            c.map(|c| c.declaration.node.name.to_string()).collect()
+        };
+        // The attribute selector counts for more, so it comes first.
+        assert_eq!(
+            names(c.style_for_pseudo(&IMG, "::BEFORE")),
+            ["content", "color"]
+        );
+        assert_eq!(
+            names(c.style_for_pseudo(&IMG, "before")),
+            ["content", "color"]
+        );
+        assert!(names(c.style_for_pseudo(&IMG, "after")).is_empty());
+        assert_eq!(
+            names(c.style_for(&IMG, None)),
+            ["width"],
+            "the element's own"
+        );
+        assert_eq!(names(c.style_for_pseudo(&P_A, "before")), ["color"]);
+    }
+
+    #[test]
+    fn a_pseudo_element_only_a_tree_cannot_settle_is_unknown() {
+        for (css, name) in [
+            ("img::before:hover { color: red }", "before"),
+            ("img::part(x) { color: red }", "part(x)"),
+        ] {
+            let c = cascade(&[css]);
+            assert_eq!(c.pseudo_elements_for(&IMG), [name]);
+            let style = c.style_for_pseudo(&IMG, name);
+            assert_eq!(style.property("color").status, Match::Unknown, "{css}");
+        }
+        // A chain is its own target, not the first of its links.
+        let c = cascade(&["img::before::marker { color: red }"]);
+        assert_eq!(c.pseudo_elements_for(&IMG), ["before::marker"]);
+        assert_eq!(c.style_for_pseudo(&IMG, "before").candidates.len(), 0);
+        // What stands left of it is about the element, as ever.
+        let c = cascade(&["p > img::after { color: red } body > img::after { top: 0 }"]);
+        assert_eq!(c.style_for_pseudo(&IMG, "after").candidates.len(), 1);
+    }
+
+    /// One element, both states, no attribute.
+    fn compare(before: &str, after: &str) -> StyleComparison {
+        let (x, y) = (cascade(&[before]), cascade(&[after]));
+        x.compare_to(&y).element(&IMG, None, &IMG, None)
+    }
+
+    #[test]
+    fn what_cannot_change_a_style_compares_the_same() {
+        let base = "img { width: 1px; margin: 0 } p { color: red }";
+        for after in [
+            base,
+            "/* note */ img{ width:1px ;margin:0 }  p{color:red}",
+            "img { width: 1px; margin: 0; width: banana } p { color: red }",
+            "img { width: 1px; margin: 0; widht: 2px } p { color: red }",
+            "img { width: 1px; margin: 0 } p { color: red",
+            "img { width: 1px; margin: 0 }",
+            "img { width: 1px !important; margin: 0 }",
+            "img { width: 9px; width: 1px; margin: 0 }",
+        ] {
+            let c = compare(base, after);
+            assert_eq!(c.status, Match::Yes, "{after}: {:?}", c.differences);
+        }
+    }
+
+    #[test]
+    fn a_certain_difference_is_no_and_names_the_longhand() {
+        let c = compare("img { width: 1px }", "img { width: 2px }");
+        assert_eq!(c.status, Match::No);
+        assert_eq!(c.differences[0].property, "width");
+        assert_eq!(c.differences[0].pseudo, None);
+        assert_eq!(compare("img {}", "img { width: 2px }").status, Match::No);
+        assert_eq!(compare("img { color: red }", "img {}").status, Match::No);
+        let c = compare("img { margin: 0 }", "img { margin: 1px }");
+        assert_eq!(c.differences.len(), 4);
+        assert_eq!(c.differences[0].property, "margin-bottom");
+        // Custom properties reach the values that use them.
+        assert_eq!(
+            compare("img { --x: 1 }", "img { --x: 2 }").status,
+            Match::No
+        );
+        // As written: no normalizing.
+        assert_eq!(
+            compare("img { color: red }", "img { color: #f00 }").status,
+            Match::No
+        );
+    }
+
+    #[test]
+    fn what_reading_cannot_tell_apart_is_unknown() {
+        for (before, after) in [
+            // The same value through another name.
+            (
+                "img { margin-top: 0; margin-right: 0; margin-bottom: 0; margin-left: 0 }",
+                "img { margin: 0 }",
+            ),
+            // The value a browser would compute anyway.
+            ("img {}", "img { color: inherit }"),
+            ("img {}", "img { color: initial }"),
+            // Added, removed or changed under what a static tree cannot say.
+            ("img {}", "img:hover { width: 1px }"),
+            ("img {}", "@media print { img { width: 1px } }"),
+            (
+                "img { width: 1px }",
+                "img { width: 1px } img:hover { width: 2px }",
+            ),
+            // Standard and prefixed, which only some reading systems honour.
+            ("img { -webkit-hyphens: auto }", "img {}"),
+            ("img { -epub-hyphens: auto }", "img { -epub-hyphens: none }"),
+            // A logical property may be either physical one.
+            ("img { margin-left: 0 }", "img { margin-inline-start: 0 }"),
+        ] {
+            let c = compare(before, after);
+            assert_eq!(c.status, Match::Unknown, "{before} -> {after}: {c:?}");
+        }
+    }
+
+    /// The same uncertain value is not the same under another condition.
+    #[test]
+    fn an_uncertain_setter_counts_with_its_condition() {
+        let same = |css: &str| assert_eq!(compare(css, css).status, Match::Yes, "{css}");
+        same("@media print { img { width: 1px } }");
+        same("img:hover { width: 1px } img { width: 2px }");
+        for (before, after) in [
+            (
+                "@media print { img { width: 1px } }",
+                "@media screen { img { width: 1px } }",
+            ),
+            ("img:hover { width: 1px }", "img:focus { width: 1px }"),
+            (
+                "img { &:hover { width: 1px } }",
+                "img { &:focus { width: 1px } }",
+            ),
+            (
+                "body img:hover { width: 1px }",
+                "html img:hover { width: 1px }",
+            ),
+            (
+                "@media print { @supports (color: red) { img { width: 1px } } }",
+                "@media screen { @supports (color: red) { img { width: 1px } } }",
+            ),
+        ] {
+            let c = compare(before, after);
+            assert_eq!(c.status, Match::Unknown, "{before} -> {after}: {c:?}");
+            assert!(!c.differences[0].reasons.is_empty());
+        }
+        // Below a certain winner nothing can win, so what changes there does
+        // not count; a certain winner's own changes do.
+        let top = "img { width: 1px !important }";
+        let (x, y) = (
+            format!("{top} img:hover {{ width: 2px }}"),
+            format!("{top} img:focus {{ width: 3px }}"),
+        );
+        assert_eq!(compare(&x, &y).status, Match::Yes);
+    }
+
+    /// What `style_for` alone cannot see.
+    #[test]
+    fn pseudo_elements_are_compared() {
+        let c = compare("img::before { content: 'x' }", "img { }");
+        assert_eq!(c.status, Match::No);
+        assert_eq!(c.differences[0].pseudo.as_deref(), Some("before"));
+        assert_eq!(c.differences[0].property, "content");
+        assert_eq!(
+            compare(
+                "img::before { content: 'x' }",
+                "img::before { content: 'x' }"
+            )
+            .status,
+            Match::Yes
+        );
+        // An attribute only one state's element has.
+        let c = cascade(&["[width]::before { content: 'x' }"]);
+        let result = c.compare_to(&c).element(&IMG, None, &P_A, None);
+        assert_eq!(result.status, Match::No);
+        let c = compare("img::before:hover { color: red }", "img { }");
+        assert_eq!(c.status, Match::Unknown);
+    }
+
+    #[test]
+    fn a_style_attribute_is_compared() {
+        let c = cascade(&["img { width: 1px }"]);
+        let attr = |s: &'static str| crate::parse_block_contents(s).0;
+        let compare = |x: &[BlockItem<'_>], y: &[BlockItem<'_>]| {
+            c.compare_to(&c)
+                .element(&IMG, Some(x), &IMG, Some(y))
+                .status
+        };
+        assert_eq!(
+            compare(&attr("color: red"), &attr("color:red; colr: blue")),
+            Match::Yes
+        );
+        assert_eq!(
+            compare(&attr("color: red"), &attr("color: blue")),
+            Match::No
+        );
+    }
+
+    #[test]
+    fn rules_that_style_no_element_are_compared_for_the_document() {
+        let face = "@font-face { font-family: a; src: url(a.woff) }";
+        let other = "@font-face { font-family: b; src: url(b.woff) }";
+        let (x, y) = (
+            cascade(&[face]),
+            cascade(&["/* */ @font-face{font-family:a;src:url(a.woff)}"]),
+        );
+        let same = x.compare_to(&y);
+        assert!(same.differing_at_rules.is_empty());
+        assert_eq!(same.element(&IMG, None, &IMG, None).status, Match::Yes);
+        for (before, after) in [
+            (face.to_string(), other.to_string()),
+            (face.to_string(), String::new()),
+            (format!("{face} {other}"), format!("{other} {face}")),
+            (
+                format!("@media print {{ {face} }}"),
+                format!("@media screen {{ {face} }}"),
+            ),
+            (
+                "@keyframes a { to { top: 0 } }".to_string(),
+                "@keyframes a { to { top: 1px } }".to_string(),
+            ),
+            ("@page { margin: 0 }".to_string(), String::new()),
+            ("@unheard x;".to_string(), String::new()),
+        ] {
+            let (x, y) = (cascade(&[&before]), cascade(&[&after]));
+            let comparer = x.compare_to(&y);
+            assert!(
+                !comparer.differing_at_rules.is_empty(),
+                "{before} -> {after}"
+            );
+            let c = comparer.element(&IMG, None, &IMG, None);
+            assert_eq!(c.status, Match::Unknown, "{before} -> {after}");
+            assert!(c.differences.is_empty());
+        }
+        // A certain difference stays one.
+        let (x, y) = (
+            cascade(&[&format!("{face} img {{ width: 1px }}")]),
+            cascade(&[&format!("{other} img {{ width: 2px }}")]),
+        );
+        assert_eq!(
+            x.compare_to(&y).element(&IMG, None, &IMG, None).status,
+            Match::No
+        );
+    }
+
+    /// A chain of conditions as deep as the parser allows must not overflow
+    /// the stack when it is dropped.
+    #[test]
+    fn deep_nesting_is_bounded_in_a_comparison() {
+        let n = 100_000;
+        let deep = format!(
+            "{}img {{ width: 1px }}{}",
+            "@media print {".repeat(n),
+            "}".repeat(n)
+        );
+        let c = compare(&deep, &deep);
+        assert_eq!(c.status, Match::Yes);
     }
 
     #[test]

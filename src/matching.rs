@@ -12,7 +12,7 @@
 //! selector ending in a pseudo-element (`img::before`) styles a box the
 //! element generates, never the element's own properties, so it answers No.
 //! A caller asking "does anything style this element or the boxes it
-//! generates" has to look at those selectors separately. A caller that
+//! generates" asks [`ComplexSelector::matches_pseudo`] as well. A caller that
 //! acts only on a certain "no" (a converter deciding whether CSS could
 //! override an attribute, say) treats `Unknown` as `Yes`; one that reports
 //! can say which it was. Unknown covers:
@@ -204,6 +204,26 @@ impl ComplexSelector<'_> {
     pub fn matches<E: Element>(&self, element: &E, namespaces: &Namespaces<'_>) -> Match {
         Matcher::new(namespaces).complex(self, element)
     }
+
+    /// Whether this selector styles the pseudo-element `pseudo` of `element`:
+    /// `td[width]::before` asked about `before`. The name is compared as
+    /// [`pseudo_element`](Self::pseudo_element) gives it, with or without its
+    /// colons. A pseudo-class on the pseudo-element (`::before:hover`), or a
+    /// functional pseudo-element (`::part(x)`), which a static tree cannot
+    /// settle, is at most Unknown.
+    pub fn matches_pseudo<E: Element>(
+        &self,
+        element: &E,
+        namespaces: &Namespaces<'_>,
+        pseudo: &str,
+    ) -> Match {
+        Matcher::new(namespaces).complex_pseudo(self, element, &pseudo_name(pseudo))
+    }
+}
+
+/// A pseudo-element's name as [`ComplexSelector::pseudo_element`] gives it.
+pub(crate) fn pseudo_name(pseudo: &str) -> String {
+    pseudo.trim_start_matches(':').to_ascii_lowercase()
 }
 
 struct Matcher<'n, 'a> {
@@ -237,6 +257,52 @@ impl<'n, 'a> Matcher<'n, 'a> {
         }
     }
 
+    /// [`complex`](Self::complex) for a pseudo-element of `element`. Only the
+    /// subject differs: a selector inside `:is()` is about elements, as ever.
+    fn complex_pseudo<E: Element>(
+        &self,
+        selector: &ComplexSelector<'_>,
+        element: &E,
+        pseudo: &str,
+    ) -> Match {
+        let Some(last) = selector.compounds.len().checked_sub(1) else {
+            return Match::No;
+        };
+        if selector.pseudo_element().as_deref() != Some(pseudo) {
+            return Match::No;
+        }
+        let Some(left) = self.steps.get().checked_sub(1) else {
+            return Match::Unknown;
+        };
+        self.steps.set(left);
+        let mut here = Match::Yes;
+        let mut on_the_box = false;
+        for s in &selector.compounds[last].node.simples {
+            here = match &s.node {
+                SimpleSelector::PseudoElement(p) => {
+                    on_the_box = true;
+                    if p.args.is_some() {
+                        here.and(Match::Unknown)
+                    } else {
+                        here
+                    }
+                }
+                // The state of the box, not of the element.
+                _ if on_the_box => here.and(Match::Unknown),
+                simple => here.and(self.simple(simple, element)),
+            };
+            if here == Match::No {
+                return here;
+            }
+        }
+        let m = self.rest(selector, last, element, here);
+        if selector.leading.is_some() {
+            m.and(Match::Unknown)
+        } else {
+            m
+        }
+    }
+
     /// Whether compounds `0..=k` of `selector` match with compound `k` on
     /// `element`. Right to left: the subject first, then the combinator to
     /// its left, so a mismatch stops the walk before any ancestor is visited.
@@ -246,6 +312,17 @@ impl<'n, 'a> Matcher<'n, 'a> {
         };
         self.steps.set(left);
         let here = self.compound(&selector.compounds[k].node, element);
+        self.rest(selector, k, element, here)
+    }
+
+    /// Compounds `0..k`, to the left of compound `k`, which answered `here`.
+    fn rest<E: Element>(
+        &self,
+        selector: &ComplexSelector<'_>,
+        k: usize,
+        element: &E,
+        here: Match,
+    ) -> Match {
         if here == Match::No || k == 0 {
             return here;
         }

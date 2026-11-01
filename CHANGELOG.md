@@ -7,6 +7,29 @@ styloria is pre-1.0, so new features and breaking changes both land as
 minor-version bumps (`0.x.0`), per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Added
+
+- **Pseudo-elements in the cascade.** `Cascade::style_for_pseudo` gives the
+  declarations that could apply to one pseudo-element of an element, and
+  `Cascade::pseudo_elements_for` names the ones rules could style on it.
+  `ComplexSelector::matches_pseudo` and `ComplexSelector::pseudo_element` are
+  the same on one selector. `:before` and `::before` are one name. A
+  pseudo-class on the pseudo-element (`::before:hover`) and a functional one
+  (`::part(x)`) are at most Unknown. `style_for` does not change: a
+  pseudo-element is still not the element.
+- **Comparing two states of a document.** `Cascade::compare_to` gives a
+  `StyleComparer`, whose `element` answers whether a change to the stylesheets,
+  or to the document, reaches an element and its pseudo-elements: `Yes` (the
+  same), `No` (a property certainly differs as written) or `Unknown`, with each
+  `StyleDifference` by property. Values are read as written and not normalized.
+  An uncertain declaration is the same only under the same conditions, so
+  `@media print` and `@media screen` differ though the rule inside is one. Rules
+  that style no element (`@font-face`, `@keyframes`, `@page`, …) are compared
+  for the document as a whole (`differing_at_rules`); a difference among them
+  turns every `Yes` into `Unknown`.
+
 ## [0.17.0] - 2026-10-28
 
 ### Added
