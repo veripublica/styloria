@@ -285,8 +285,8 @@ pub enum SyntaxErrorKind {
 /// Consuming a block and consuming a component value are mutually recursive,
 /// so nesting costs stack in proportion to depth:
 /// `a{color:((((…))))}`, `@media all{@media all{…}}`,
-/// `rgb(rgb(rgb(…)))` and `:is(:is(:is(…)))` all reach it. Measured on
-/// 0.6.1, all four abort the process between 10,000 and 20,000 deep on an
+/// `rgb(rgb(rgb(…)))` and `:is(:is(:is(…)))` all reach it. Without a bound,
+/// all four abort the process between 10,000 and 20,000 deep on an
 /// 8 MiB main thread - from stylesheets of about 1.2 KB - and proportionally
 /// sooner on a 2 MiB worker thread. In Rust a stack overflow is `SIGABRT`,
 /// not a catchable panic, so no caller can defend against it downstream;
@@ -1025,7 +1025,7 @@ impl<'a> Parser<'a> {
             self.toks[close].span
         } else {
             // Only an unclosed bracket is reported; an unclosed function is
-            // not, as before 0.12 — the end of input closes it silently.
+            // not: the end of input closes it silently.
             if kind.is_some() {
                 self.error(open_span, SyntaxErrorKind::UnterminatedBlock);
             }
@@ -1502,8 +1502,8 @@ mod tests {
         assert_eq!(shape("p { 1px: red; color: blue }"), ["d:color"]);
     }
 
-    /// Before 0.12 `parse_rule_list` called this `UnterminatedRule`. A block
-    /// is a block now, whoever holds it, and the item reads as in any other.
+    /// A block is a block, whoever holds it, and the item reads as in any
+    /// other.
     #[test]
     fn a_trailing_fragment_in_a_block_is_a_malformed_item() {
         assert_eq!(
