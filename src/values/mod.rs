@@ -118,9 +118,11 @@ pub enum ValueCheck {
     Unknown(UnknownValue),
 }
 
-/// Where a value that [`ValueCheck::Invalid`] rejects would be valid after all.
+/// Where a declaration today's specifications reject, by its value or by its
+/// descriptor's name, would be valid after all.
 ///
-/// A browser still drops such a value in a document it reads to today's specs.
+/// A browser still drops such a declaration in a document it reads to today's
+/// specs.
 /// This names the older reading, for whoever has to weigh it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ValidUnder {
@@ -223,30 +225,39 @@ pub fn check_descriptor(
     })
 }
 
-/// Where `value` would be valid after all, when [`check_value`] calls it
-/// [`Invalid`](ValueCheck::Invalid); `None` otherwise.
+/// Where the declaration would be valid after all, when [`check_value`] calls
+/// `value` [`Invalid`](ValueCheck::Invalid) or says no specification defines
+/// `property` ([`UnknownProperty`](UnknownValue::UnknownProperty)): `marker-offset:
+/// 1px` is [`Css2`](ValidUnder::Css2). `None` otherwise.
 pub fn valid_under(property: &str, value: &[Spanned<ComponentValue<'_>>]) -> Option<ValidUnder> {
-    if check_value(property, value) != ValueCheck::Invalid {
-        return None;
+    match check_value(property, value) {
+        ValueCheck::Invalid | ValueCheck::Unknown(UnknownValue::UnknownProperty) => {
+            rejected_property_valid_under(property, value)
+        }
+        _ => None,
     }
-    invalid_property_valid_under(property, value)
 }
 
-/// Where `value` would be valid after all, when [`check_descriptor`] calls it
-/// [`Invalid`](ValueCheck::Invalid); `None` otherwise.
+/// Where the declaration would be valid after all, when [`check_descriptor`]
+/// calls `value` [`Invalid`](ValueCheck::Invalid) or says the at-rule does not
+/// define `name` ([`UnknownProperty`](UnknownValue::UnknownProperty)): `@font-face
+/// { font-variant: small-caps }` is [`Css2`](ValidUnder::Css2). `None` otherwise,
+/// and when the name was CSS2's but the value does not fit it.
 pub fn descriptor_valid_under(
     at_rule: &str,
     name: &str,
     value: &[Spanned<ComponentValue<'_>>],
 ) -> Option<ValidUnder> {
-    if check_descriptor(at_rule, name, value) != ValueCheck::Invalid {
-        return None;
+    match check_descriptor(at_rule, name, value) {
+        ValueCheck::Invalid | ValueCheck::Unknown(UnknownValue::UnknownProperty) => {
+            rejected_descriptor_valid_under(at_rule, name, value)
+        }
+        _ => None,
     }
-    invalid_descriptor_valid_under(at_rule, name, value)
 }
 
-/// [`valid_under`] for a value already found Invalid.
-pub(crate) fn invalid_property_valid_under(
+/// [`valid_under`] for a declaration already rejected.
+pub(crate) fn rejected_property_valid_under(
     property: &str,
     value: &[Spanned<ComponentValue<'_>>],
 ) -> Option<ValidUnder> {
@@ -265,11 +276,11 @@ pub(crate) fn invalid_property_valid_under(
     (uncached(&property, &items) == ValueCheck::Valid).then_some(ValidUnder::QuirksMode)
 }
 
-/// [`descriptor_valid_under`] for a value already found Invalid. CSS2's
+/// [`descriptor_valid_under`] for a declaration already rejected. CSS2's
 /// at-rules with declarations are `@font-face` and `@page`, whose `size` and
 /// `marks` it lists as properties. Quirks mode is about properties in style
 /// rules, so it does not come in here.
-pub(crate) fn invalid_descriptor_valid_under(
+pub(crate) fn rejected_descriptor_valid_under(
     at_rule: &str,
     name: &str,
     value: &[Spanned<ComponentValue<'_>>],

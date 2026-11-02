@@ -51,8 +51,8 @@ use crate::known_properties::is_known_property;
 use crate::parser::{self, BlockItem, Rule, Stylesheet};
 use crate::span::{Span, Spanned};
 use crate::values::{
-    ValidUnder, ValueCheck, check_declaration, check_descriptor, invalid_descriptor_valid_under,
-    invalid_property_valid_under,
+    ValidUnder, ValueCheck, check_declaration, check_descriptor, rejected_descriptor_valid_under,
+    rejected_property_valid_under,
 };
 
 /// One validation finding, located by the source [`Span`] it concerns.
@@ -70,11 +70,23 @@ pub struct Diagnostic {
 pub enum DiagnosticKind {
     /// A declaration in a style rule whose property name CSS does not define,
     /// and which is neither custom (`--*`) nor vendor-prefixed (`-webkit-…`).
-    UnknownProperty,
+    UnknownProperty {
+        /// Where the declaration would be valid after all, if anywhere: both
+        /// the name and the value have to fit. `marker-offset: 1px` is
+        /// [`ValidUnder::Css2`]; `colr: red` is `None`.
+        valid_under: Option<ValidUnder>,
+    },
     /// A declaration in an at-rule whose name that at-rule does not define as
     /// a descriptor. `at_rule` is the canonical at-rule name without the `@`
     /// (e.g. `"font-face"`).
-    UnknownDescriptor { at_rule: &'static str },
+    UnknownDescriptor {
+        at_rule: &'static str,
+        /// Where the declaration would be valid after all, if anywhere: both
+        /// the name and the value have to fit. `@font-face { font-variant:
+        /// small-caps }` is [`ValidUnder::Css2`]; `font-variant: banana` is
+        /// `None`.
+        valid_under: Option<ValidUnder>,
+    },
     /// A declaration whose value cannot fit its property's or descriptor's
     /// grammar, so a browser drops it. The span covers the value's bytes
     /// exactly (without `!important`), so slicing the source with it gives
@@ -263,7 +275,7 @@ fn check_items(items: &[BlockItem<'_>], vocab: &Vocab, out: &mut Vec<Diagnostic>
     for item in items {
         match item {
             BlockItem::Declaration(d) => {
-                check_name(&d.node.name, d.node.name_span, vocab, out);
+                check_name(&d.node, vocab, out);
                 check_value(&d.node, vocab, out);
             }
             BlockItem::Rule(r) => check_rule(r, true, out),
@@ -285,10 +297,10 @@ fn check_value(d: &parser::Declaration<'_>, vocab: &Vocab, out: &mut Vec<Diagnos
         return;
     };
     let (at_rule, valid_under) = match vocab {
-        Vocab::Property => (None, invalid_property_valid_under(&d.name, &d.value)),
+        Vocab::Property => (None, rejected_property_valid_under(&d.name, &d.value)),
         Vocab::Descriptor { at_rule, .. } => (
             Some(*at_rule),
-            invalid_descriptor_valid_under(at_rule, &d.name, &d.value),
+            rejected_descriptor_valid_under(at_rule, &d.name, &d.value),
         ),
     };
     out.push(Diagnostic {
@@ -301,9 +313,10 @@ fn check_value(d: &parser::Declaration<'_>, vocab: &Vocab, out: &mut Vec<Diagnos
     });
 }
 
-/// Report `name` as unknown unless it is valid in `vocab` or exempt. Names are
-/// ASCII case-insensitive, so the lookup is done in lower case.
-fn check_name(name: &str, span: Span, vocab: &Vocab, out: &mut Vec<Diagnostic>) {
+/// Report the declaration's name as unknown unless it is valid in `vocab` or
+/// exempt. Names are ASCII case-insensitive, so the lookup is done in lower case.
+fn check_name(d: &parser::Declaration<'_>, vocab: &Vocab, out: &mut Vec<Diagnostic>) {
+    let name: &str = &d.name;
     // Any leading-dash name is exempt: `--*` is an author-defined custom
     // property, and `-webkit-`/`-moz-`/etc. are vendor extensions outside the
     // standard registry. No standard property or descriptor starts with a
@@ -312,8 +325,10 @@ fn check_name(name: &str, span: Span, vocab: &Vocab, out: &mut Vec<Diagnostic>) 
         return;
     }
     let is_property = || is_known_property(name);
-    let (valid, kind) = match vocab {
-        Vocab::Property => (is_property(), DiagnosticKind::UnknownProperty),
+    let kind = match vocab {
+        Vocab::Property => (!is_property()).then(|| DiagnosticKind::UnknownProperty {
+            valid_under: rejected_property_valid_under(name, &d.value),
+        }),
         Vocab::Descriptor {
             at_rule,
             names,
@@ -321,12 +336,15 @@ fn check_name(name: &str, span: Span, vocab: &Vocab, out: &mut Vec<Diagnostic>) 
         } => {
             let ok = names.iter().any(|n| n.eq_ignore_ascii_case(name))
                 || (*allow_properties && is_property());
-            (ok, DiagnosticKind::UnknownDescriptor { at_rule })
+            (!ok).then(|| DiagnosticKind::UnknownDescriptor {
+                at_rule,
+                valid_under: rejected_descriptor_valid_under(at_rule, name, &d.value),
+            })
         }
     };
-    if !valid {
+    if let Some(kind) = kind {
         out.push(Diagnostic {
-            span,
+            span: d.name_span,
             kind,
             name: name.to_string(),
         });
@@ -336,6 +354,9 @@ fn check_name(name: &str, span: Span, vocab: &Vocab, out: &mut Vec<Diagnostic>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An unknown property with no older reading.
+    const UNKNOWN_PROPERTY: DiagnosticKind = DiagnosticKind::UnknownProperty { valid_under: None };
 
     /// An invalid value in a style rule, with no older reading.
     const INVALID: DiagnosticKind = DiagnosticKind::InvalidValue {
@@ -360,7 +381,7 @@ mod tests {
         // JSWolf's real case: `font-eight` for `font-weight`.
         let d = validate_stylesheet("p { font-eight: bold }");
         assert_eq!(d.len(), 1);
-        assert_eq!(d[0].kind, DiagnosticKind::UnknownProperty);
+        assert_eq!(d[0].kind, UNKNOWN_PROPERTY);
         assert_eq!(d[0].name, "font-eight");
     }
 
@@ -425,7 +446,8 @@ mod tests {
         assert_eq!(
             d[0].kind,
             DiagnosticKind::UnknownDescriptor {
-                at_rule: "font-face"
+                at_rule: "font-face",
+                valid_under: None,
             }
         );
         assert_eq!(d[0].span.slice(css), "color");
@@ -455,7 +477,10 @@ mod tests {
         assert_eq!(d[0].name, "bogus-thing");
         assert_eq!(
             d[0].kind,
-            DiagnosticKind::UnknownDescriptor { at_rule: "page" }
+            DiagnosticKind::UnknownDescriptor {
+                at_rule: "page",
+                valid_under: None
+            }
         );
     }
 
@@ -484,7 +509,7 @@ mod tests {
         let d = validate_declaration_list(css);
         assert_eq!(d.len(), 1);
         assert_eq!(d[0].name, "font-eight");
-        assert_eq!(d[0].kind, DiagnosticKind::UnknownProperty);
+        assert_eq!(d[0].kind, UNKNOWN_PROPERTY);
         assert_eq!(d[0].span.slice(css), "font-eight");
     }
 
@@ -700,7 +725,8 @@ mod tests {
         assert_eq!(
             d[0].kind,
             DiagnosticKind::UnknownDescriptor {
-                at_rule: "font-face"
+                at_rule: "font-face",
+                valid_under: None,
             }
         );
         assert_eq!(d[0].span.slice(bad), "srcc");
@@ -730,7 +756,7 @@ mod tests {
             got,
             [
                 (INVALID, "width", "banana"),
-                (DiagnosticKind::UnknownProperty, "colr", "colr"),
+                (UNKNOWN_PROPERTY, "colr", "colr"),
                 (INVALID, "font-style", "bold"),
             ]
         );
@@ -772,6 +798,163 @@ mod tests {
                 v.to_string()
             ))
         );
+    }
+
+    #[test]
+    fn an_unknown_descriptor_says_if_css2_had_it() {
+        let got = |css: &str| match validate_stylesheet(css).as_slice() {
+            [d] => match d.kind {
+                DiagnosticKind::UnknownDescriptor {
+                    at_rule,
+                    valid_under,
+                } => (at_rule, valid_under),
+                other => panic!("{css}: {other:?}"),
+            },
+            other => panic!("{css}: {other:?}"),
+        };
+        let css2 = ("font-face", Some(ValidUnder::Css2));
+        let none = ("font-face", None);
+        // Name and value are both CSS2's, in any case.
+        assert_eq!(got("@font-face { font-variant: small-caps }"), css2);
+        assert_eq!(got("@font-face { FONT-VARIANT: normal, small-caps }"), css2);
+        assert_eq!(got("@font-face { stemv: 80 }"), css2);
+        assert_eq!(got("@font-face { panose-1: 1 2 3 4 5 6 7 8 9 0 }"), css2);
+        assert_eq!(got("@media print { @font-face { ascent: 1 } }"), css2);
+        // CSS2's name with a value it does not take, or no such name at all.
+        assert_eq!(got("@font-face { font-variant: banana }"), none);
+        assert_eq!(got("@font-face { color: red }"), none);
+        assert_eq!(got("@font-face { font-familly: a }"), none);
+        // @page: CSS2's marker-offset is a property nothing defines today.
+        assert_eq!(
+            got("@page { marker-offset: 1px }"),
+            ("page", Some(ValidUnder::Css2))
+        );
+        assert_eq!(got("@page { banana: 1 }"), ("page", None));
+        // Only CSS2 has @font-face and @page; quirks mode is for style rules.
+        assert_eq!(
+            got("@counter-style x { font-variant: normal }"),
+            ("counter-style", None)
+        );
+    }
+
+    #[test]
+    fn an_unknown_property_says_if_css2_had_it() {
+        let css2 = DiagnosticKind::UnknownProperty {
+            valid_under: Some(ValidUnder::Css2),
+        };
+        let kinds =
+            |css: &str| -> Vec<_> { validate_stylesheet(css).iter().map(|d| d.kind).collect() };
+        assert_eq!(kinds("p { marker-offset: 1px }"), [css2]);
+        assert_eq!(kinds("p { MARKER-OFFSET: auto }"), [css2]);
+        assert_eq!(kinds("p { marks: crop cross }"), [css2]);
+        assert_eq!(kinds("p { marker-offset: banana }"), [UNKNOWN_PROPERTY]);
+        assert_eq!(kinds("p { marks: banana }"), [UNKNOWN_PROPERTY]);
+        assert_eq!(kinds("p { colr: red }"), [UNKNOWN_PROPERTY]);
+        let list: Vec<_> = validate_declaration_list("marker-offset: 1px")
+            .iter()
+            .map(|d| d.kind)
+            .collect();
+        assert_eq!(list, [css2]);
+        // In a style rule `size` is CSS Sizing 4's now, so an old value of it
+        // is an invalid value with that older reading.
+        assert_eq!(
+            kinds("p { size: landscape }"),
+            [DiagnosticKind::InvalidValue {
+                at_rule: None,
+                valid_under: Some(ValidUnder::Css2),
+            }]
+        );
+    }
+
+    #[test]
+    fn properties_the_specifications_add_to_mdn_are_known() {
+        for css in [
+            "animation-delay: 1s 2s, 3s",
+            "animation-delay-start: -1s",
+            "animation-delay-end: 1s, 2s",
+            "animation-range-center: normal, 10%, source 5px, target",
+            "color-interpolation: linearRGB",
+            "copy-into: none",
+            "copy-into: a element, b text",
+            "event-trigger: none",
+            "event-trigger: --a click() / keypress(\"k\")",
+            "event-trigger-name: --a, --b",
+            "event-trigger-source: none, dblclick() focusin()",
+            "fit-tolerance: infinite",
+            "flex-line-count: 2",
+            "max-size: 10px none",
+            "min-size: auto",
+            "path-length: 10px",
+            "pointer-timeline: --a x, none",
+            "pointer-timeline-axis: block, y",
+            "pointer-timeline-name: none, --a",
+            "scroll-axis-lock: none",
+            "shape-padding: 10%",
+            "size: 10px 2em",
+            "text-fit: grow per-line 50%",
+            "timeline-trigger-range: normal / normal",
+        ] {
+            assert_eq!(validate_declaration_list(css), [], "{css}");
+        }
+        for css in [
+            "animation-delay-end: -1s",
+            "color-interpolation: banana",
+            "event-trigger-source: banana",
+            "fit-tolerance: -1px",
+            "flex-line-count: 0",
+            "path-length: -1px",
+            "pointer-timeline-axis: diagonal",
+            "scroll-axis-lock: auto none",
+            "shape-padding: -1px",
+            "size: 1px 2px 3px",
+            "text-fit: 50%",
+        ] {
+            let d = validate_declaration_list(css);
+            assert!(
+                matches!(d.as_slice(), [d] if matches!(d.kind, DiagnosticKind::InvalidValue { .. })),
+                "{css}: {d:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn descriptors_the_specifications_add_to_mdn_are_known() {
+        for css in [
+            "@font-face { font-width: 75% 125% }",
+            "@font-face { font-width: auto }",
+            "@font-face { font-named-instance: \"Bold\" }",
+            "@font-face { font-language-override: \"TRK\" }",
+            "@font-face { font-size: 8 12 }",
+            "@font-face { superscript-position-override: from-font 80% }",
+            "@font-face { subscript-position-override: normal }",
+            "@font-face { superscript-size-override: 60% }",
+            "@font-face { subscript-size-override: from-font }",
+            "@font-face { ascent-override: 90% normal }",
+            "@font-face { descent-override: 20% 30% }",
+            "@font-face { line-gap-override: normal normal }",
+            "@page { page-margin-safety: clamp }",
+        ] {
+            assert_eq!(validate_stylesheet(css), [], "{css}");
+        }
+        let invalid = |css: &str| match validate_stylesheet(css).as_slice() {
+            [d] => match d.kind {
+                DiagnosticKind::InvalidValue { valid_under, .. } => valid_under,
+                other => panic!("{css}: {other:?}"),
+            },
+            other => panic!("{css}: {other:?}"),
+        };
+        // Known now, so a value goes by its grammar and may still be CSS2's.
+        assert_eq!(
+            invalid("@font-face { font-size: 12pt }"),
+            Some(ValidUnder::Css2)
+        );
+        assert_eq!(
+            invalid("@font-face { font-size: all }"),
+            Some(ValidUnder::Css2)
+        );
+        assert_eq!(invalid("@font-face { font-size: 1 2 3 }"), None);
+        assert_eq!(invalid("@font-face { subscript-size-override: -1% }"), None);
+        assert_eq!(invalid("@page { page-margin-safety: 1 }"), None);
     }
 
     #[test]

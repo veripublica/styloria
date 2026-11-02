@@ -19,6 +19,12 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   sans-serif }` or `display: compact`, and `QuirksMode` for a unitless number in
   a property of CSS Values 4 Appendix C, such as `width: 150`.
 - `valid_under` and `descriptor_valid_under` ask the same of one value.
+- **`DiagnosticKind::UnknownDescriptor` and `UnknownProperty` say the same.**
+  They are now `UnknownDescriptor { at_rule, valid_under }` and `UnknownProperty
+  { valid_under }`, which breaks any code matching them. `valid_under` is `Css2`
+  when CSS2 had the name and its grammar takes the value: `@font-face {
+  font-variant: small-caps }` and `marker-offset: 1px`, but not `font-variant:
+  banana`. `descriptor_valid_under` and `valid_under` answer for these too.
 
 ### Changed
 
@@ -35,6 +41,27 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 - **A keyword inside a longer family name is Valid.** `inherit simple`, `simple
   default` and `local(inherit A)` were Invalid. Web Platform Tests and the
   engines tested keep them, and w3c/csswg-drafts#13692 is open on the text.
+- **Descriptors the specifications define are no longer unknown.** `@font-face`
+  takes `font-width`, `font-named-instance` and `font-language-override` (CSS
+  Fonts 4), and `font-size` and the four `superscript-*` and `subscript-*`
+  overrides (CSS Fonts 5). `ascent-override`, `descent-override` and
+  `line-gap-override` take two values (CSS Fonts 5). `@page` takes
+  `page-margin-safety`, whose grammar was already here. So `@font-face {
+  font-size: 12 }` is Valid and `font-size: 12pt` is `InvalidValue` with `Css2`.
+- **Properties the specifications define are no longer unknown.** 21 names, from
+  CSS Sizing 4 (`size`, `min-size`, `max-size`), CSS Animations 2, Pointer
+  Animations 1, CSS Animation Triggers 1, CSS GCPM 4, CSS Grid 3, CSS Flexbox 2,
+  CSS Overflow 5, CSS Shapes 2, CSS Text 5 and SVG 2, each with its grammar. A
+  value in a style rule goes by that grammar: `size: 10px 2em` is Valid, `size:
+  landscape` is `InvalidValue` with `Css2`. `@supports` reads these names as any
+  other: a fitting value is Yes.
+- **The cascade reads the shorthands among them.** `size`, `min-size` and
+  `max-size` set their width and height, so `style_for` counts `size: 10px`
+  against `width`. So do `event-trigger`, `pointer-timeline` and
+  `timeline-trigger-range`. `animation-delay` is a shorthand of
+  `animation-delay-start` and `animation-delay-end` and takes both (CSS
+  Animations 2).
+- `path-length` has SVG 2's grammar: mdn has the range outside the type.
 - `revert-rule` is a CSS-wide keyword (CSS Cascade 5 §7.3.6), in value checks and
   in the cascade, where it is Unknown like `revert`.
 - Value checking follows the specifications' grammars for 51 more properties,

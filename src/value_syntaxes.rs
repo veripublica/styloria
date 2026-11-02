@@ -226,8 +226,14 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
         "@counter-style/system",
         "cyclic | numeric | alphabetic | symbolic | additive | [ fixed <integer>? ] | [ extends <counter-style-name> ]",
     ),
-    ("@font-face/ascent-override", "normal | <percentage>"),
-    ("@font-face/descent-override", "normal | <percentage>"),
+    (
+        "@font-face/ascent-override",
+        "normal | <percentage> | [ normal | <percentage [0,∞]> ]{1,2}",
+    ),
+    (
+        "@font-face/descent-override",
+        "normal | <percentage> | [ normal | <percentage [0,∞]> ]{1,2}",
+    ),
     (
         "@font-face/font-display",
         "auto | block | swap | fallback | optional",
@@ -237,6 +243,9 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
         "@font-face/font-feature-settings",
         "normal | <feature-tag-value>#",
     ),
+    ("@font-face/font-language-override", "normal | <string>"),
+    ("@font-face/font-named-instance", "auto | <string>"),
+    ("@font-face/font-size", "auto | [<number>]{1,2}"),
     ("@font-face/font-stretch", "<font-stretch-absolute>{1,2}"),
     (
         "@font-face/font-style",
@@ -250,9 +259,29 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
         "@font-face/font-weight",
         "<font-weight-absolute>{1,2} | auto",
     ),
-    ("@font-face/line-gap-override", "normal | <percentage>"),
+    ("@font-face/font-width", "auto | <'font-width'>{1,2}"),
+    (
+        "@font-face/line-gap-override",
+        "normal | <percentage> | [ normal | <percentage [0,∞]> ]{1,2}",
+    ),
     ("@font-face/size-adjust", "<percentage>"),
     ("@font-face/src", "<font-src>"),
+    (
+        "@font-face/subscript-position-override",
+        "[ normal | from-font | <percentage> ]{1,2}",
+    ),
+    (
+        "@font-face/subscript-size-override",
+        "[ normal | from-font | <percentage [0,∞]> ]{1,2}",
+    ),
+    (
+        "@font-face/superscript-position-override",
+        "[ normal | from-font | <percentage> ]{1,2}",
+    ),
+    (
+        "@font-face/superscript-size-override",
+        "[ normal | from-font | <percentage [0,∞]> ]{1,2}",
+    ),
     ("@font-face/unicode-range", "<unicode-range-token>#"),
     (
         "@font-palette-values/base-palette",
@@ -308,7 +337,12 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
     ("anchor-scope", "none | all | <dashed-ident>#"),
     ("animation", "<single-animation>#"),
     ("animation-composition", "<single-animation-composition>#"),
-    ("animation-delay", "<time>#"),
+    (
+        "animation-delay",
+        "<time># | [ <'animation-delay-start'> <'animation-delay-end'>? ]#",
+    ),
+    ("animation-delay-end", "<time [0s,∞]>#"),
+    ("animation-delay-start", "<time>#"),
     ("animation-direction", "<single-animation-direction>#"),
     ("animation-duration", "[ auto | <time [0s,∞]> ]#"),
     ("animation-fill-mode", "<single-animation-fill-mode>#"),
@@ -321,6 +355,10 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
     (
         "animation-range",
         "[ <'animation-range-start'> <'animation-range-end'>? ]#",
+    ),
+    (
+        "animation-range-center",
+        "[ normal | [ <length-percentage> | <timeline-range-center-subject> <length-percentage>? ] ]#",
     ),
     (
         "animation-range-end",
@@ -505,6 +543,7 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
     ),
     ("clip-rule", "nonzero | evenodd"),
     ("color", "<color>"),
+    ("color-interpolation", "auto | sRGB | linearRGB"),
     ("color-interpolation-filters", "auto | sRGB | linearRGB"),
     (
         "color-scheme",
@@ -551,6 +590,10 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
         "normal | none | [ <content-replacement> | <content-list> ] [ / [ <string> | <counter> | <attr()> ]+ ]?",
     ),
     ("content-visibility", "visible | auto | hidden"),
+    (
+        "copy-into",
+        "none | [ [ <custom-ident> <content-level> ] [, <custom-ident> <content-level> ]* ]?",
+    ),
     ("corner-block-end-shape", "<corner-shape-value>{1,2}"),
     ("corner-block-start-shape", "<corner-shape-value>{1,2}"),
     ("corner-bottom-left-shape", "<corner-shape-value>"),
@@ -595,11 +638,24 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
         "standard | no-limit | constrained | <dynamic-range-limit-mix()>",
     ),
     ("empty-cells", "show | hide"),
+    (
+        "event-trigger",
+        "none | [ <'event-trigger-name'> <'event-trigger-source'> ]#",
+    ),
+    ("event-trigger-name", "none | <dashed-ident>#"),
+    (
+        "event-trigger-source",
+        "[ none | <event-function>+ [ / <event-function>+ ]? ]#",
+    ),
     ("field-sizing", "content | fixed"),
     ("fill", "<paint>"),
     ("fill-opacity", "<'opacity'>"),
     ("fill-rule", "nonzero | evenodd"),
     ("filter", "none | <filter-value-list>"),
+    (
+        "fit-tolerance",
+        "normal | <length-percentage [0,∞]> | infinite",
+    ),
     (
         "flex",
         "none | [ <'flex-grow'> <'flex-shrink'>? || <'flex-basis'> ]",
@@ -871,10 +927,12 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
     ("max-height", "none | <box-size> | <anchor-size()>"),
     ("max-inline-size", "<'max-width'>"),
     ("max-lines", "none | <integer> | auto || <integer [1,∞]>"),
+    ("max-size", "<'max-width'> <'max-height'>?"),
     ("max-width", "none | <box-size> | <anchor-size()>"),
     ("min-block-size", "<'min-width'>"),
     ("min-height", "auto | <box-size> | <anchor-size()>"),
     ("min-inline-size", "<'min-width'>"),
+    ("min-size", "<'min-width'> <'min-height'>?"),
     ("min-width", "auto | <box-size> | <anchor-size()>"),
     (
         "mix-blend-mode",
@@ -949,7 +1007,7 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
     ),
     ("page-break-inside", "auto | avoid"),
     ("paint-order", "normal | [ fill || stroke || markers ]"),
-    ("path-length", "none | <length> [0,∞]"),
+    ("path-length", "none | <length [0,∞]>"),
     ("perspective", "none | <length>"),
     ("perspective-origin", "<position>"),
     ("place-content", "<'align-content'> <'justify-content'>?"),
@@ -959,6 +1017,12 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
         "pointer-events",
         "auto | none | visiblePainted | visibleFill | visibleStroke | visible | painted | fill | stroke | all | inherit | bounding-box",
     ),
+    (
+        "pointer-timeline",
+        "[ <'pointer-timeline-name'> <'pointer-timeline-axis'>? ]#",
+    ),
+    ("pointer-timeline-axis", "[ block | inline | x | y ]#"),
+    ("pointer-timeline-name", "[ none | <dashed-ident> ]#"),
     ("position", "static | relative | absolute | sticky | fixed"),
     (
         "position-anchor",
@@ -1078,10 +1142,12 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
         "shape-outside",
         "none | [ <shape-box> || <basic-shape> ] | <image>",
     ),
+    ("shape-padding", "<length-percentage [0,∞]>"),
     (
         "shape-rendering",
         "auto | optimizeSpeed | crispEdges | geometricPrecision",
     ),
+    ("size", "<'width'> <'height'>?"),
     (
         "speak-as",
         "normal | spell-out || digits || [ literal-punctuation | no-punctuation ]",
@@ -1224,6 +1290,10 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
         "[ auto | normal | <length-percentage> | <timeline-range-name> <length-percentage>? ]#",
     ),
     ("timeline-trigger-name", "none | <dashed-ident>#"),
+    (
+        "timeline-trigger-range",
+        "[ <'timeline-trigger-activation-range'> [ / <'timeline-trigger-active-range'> ]? ]#",
+    ),
     ("timeline-trigger-source", "<single-animation-timeline>#"),
     (
         "top",
@@ -1460,12 +1530,14 @@ pub(crate) const TYPE_SYNTAXES: &[(&str, &str)] = &[
     ),
     ("cf-final-image", "<image> | <color>"),
     ("cf-mixing-image", "<percentage>? && <image>"),
+    ("change()", "change()"),
     (
         "circle()",
         "circle( [ <radial-extent>{1,2} | <length-percentage [0,∞]> ]? [ at <position> ]? )",
     ),
     ("clamp()", "clamp( <calc-sum>#{3} )"),
     ("class-selector", "'.' <ident-token>"),
+    ("click()", "click()"),
     ("clip-source", "<url>"),
     (
         "color",
@@ -1556,6 +1628,10 @@ pub(crate) const TYPE_SYNTAXES: &[(&str, &str)] = &[
         "space-between | space-around | space-evenly | stretch",
     ),
     (
+        "content-level",
+        "element | content | text | <attr()> | <counter>",
+    ),
+    (
         "content-list",
         "[ <string> | <image> | <attr()> | <quote> | <counter> ]+",
     ),
@@ -1604,6 +1680,7 @@ pub(crate) const TYPE_SYNTAXES: &[(&str, &str)] = &[
     ),
     ("dasharray", "[ [ <length-percentage> | <number> ]+ ]#"),
     ("dashndashdigit-ident", "<ident-token>"),
+    ("dblclick()", "dblclick()"),
     (
         "deprecated-system-color",
         "ActiveBorder | ActiveCaption | AppWorkspace | Background | ButtonHighlight | ButtonShadow | CaptionText | InactiveBorder | InactiveCaption | InactiveCaptionText | InfoBackground | InfoText | Menu | MenuText | Scrollbar | ThreeDDarkShadow | ThreeDFace | ThreeDHighlight | ThreeDLightShadow | ThreeDShadow | Window | WindowFrame | WindowText",
@@ -1653,6 +1730,10 @@ pub(crate) const TYPE_SYNTAXES: &[(&str, &str)] = &[
     ("element()", "element( <id-selector> )"),
     ("ellipse()", "ellipse( <radial-size>? [ at <position> ]? )"),
     ("env()", "env( <custom-ident> , <declaration-value>? )"),
+    (
+        "event-function",
+        "<click()> | <dblclick()> | <pointerenter()> | <pointerleave()> | <pointerup()> | <pointerdown()> | <keypress()> | <focusin()> | <focusout()> | <input()> | <change()>",
+    ),
     ("exp()", "exp( <calc-sum> )"),
     (
         "explicit-track-list",
@@ -1697,6 +1778,8 @@ pub(crate) const TYPE_SYNTAXES: &[(&str, &str)] = &[
         "fixed-size",
         "<fixed-breadth> | minmax( <fixed-breadth> , <track-breadth> ) | minmax( <inflexible-breadth> , <fixed-breadth> )",
     ),
+    ("focusin()", "focusin()"),
+    ("focusout()", "focusout()"),
     (
         "font-features-tech",
         "features-opentype | features-aat | features-graphite",
@@ -1799,6 +1882,7 @@ pub(crate) const TYPE_SYNTAXES: &[(&str, &str)] = &[
         "inflexible-breadth",
         "<length-percentage> | min-content | max-content | auto",
     ),
+    ("input()", "input()"),
     (
         "inset()",
         "inset( <length-percentage>{1,4} [ round <'border-radius'> ]? )",
@@ -1816,6 +1900,7 @@ pub(crate) const TYPE_SYNTAXES: &[(&str, &str)] = &[
         "from | to | <percentage [0,100]> | <timeline-range-name> <percentage>",
     ),
     ("keyframes-name", "<custom-ident> | <string>"),
+    ("keypress()", "keypress( <string>? )"),
     (
         "lab()",
         "lab( [ from <color> ]? [ <percentage> | <number> | none | <lab-keyword> ]{3} [ / [ <alpha-value> | none | <lab-keyword> ] ]? )",
@@ -1980,6 +2065,10 @@ pub(crate) const TYPE_SYNTAXES: &[(&str, &str)] = &[
     ),
     ("path()", "path( <'fill-rule'>? , <string> )"),
     ("perspective()", "perspective( [ <length [0,∞]> | none ] )"),
+    ("pointerdown()", "pointerdown()"),
+    ("pointerenter()", "pointerenter()"),
+    ("pointerleave()", "pointerleave()"),
+    ("pointerup()", "pointerup()"),
     ("polar-color-space", "hsl | hwb | lch | oklch"),
     (
         "polygon()",
@@ -2251,6 +2340,7 @@ pub(crate) const TYPE_SYNTAXES: &[(&str, &str)] = &[
         "[ text | cap | ex | ideographic | ideographic-ink ] [ text | alphabetic | ideographic | ideographic-ink ]?",
     ),
     ("time-percentage", "<time> | <percentage>"),
+    ("timeline-range-center-subject", "source | target"),
     (
         "timeline-range-name",
         "cover | contain | entry | exit | entry-crossing | exit-crossing",

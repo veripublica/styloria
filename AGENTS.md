@@ -157,11 +157,16 @@ whether a list is empty, `all` or `only all`.
   would take the value: `ValidUnder::Css2` (the 1998 Recommendation) or
   `ValidUnder::QuirksMode` (CSS Values 4 Appendix C). A browser reading to
   today's specs still drops it; what that means for a document is the caller's.
+  `UnknownDescriptor` has `at_rule` and `valid_under` as well, and
+  `UnknownProperty` has `valid_under`: `Css2` when CSS2 had the name and its
+  grammar takes the value.
 - `check_value`, `check_declaration`, `check_descriptor` return `ValueCheck`:
   `Valid`, `Invalid` or `Unknown(UnknownValue)`. `valid_under` and
-  `descriptor_valid_under` give the older reading of one value.
+  `descriptor_valid_under` give the older reading of one declaration, also when
+  its name is the part that is unknown.
 
-`DiagnosticKind`: `UnknownProperty`, `UnknownDescriptor { at_rule }`,
+`DiagnosticKind`: `UnknownProperty { valid_under }`,
+`UnknownDescriptor { at_rule, valid_under }`,
 `InvalidValue { at_rule, valid_under }`,
 `UnknownAtRule`, `MisplacedAtRule`, `UnknownMediaFeature`,
 `ImportantInKeyframe`.

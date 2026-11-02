@@ -1,8 +1,8 @@
 //! Per-at-rule descriptor vocabularies, from MDN's css/at-rules.json
-//! (<https://github.com/mdn/data>). Each at-rule below defines its own
-//! closed set of descriptor names; `validate` checks an at-rule's
-//! declarations against the matching set. Sorted, for binary search.
-//! Regenerated from the source, not hand-maintained.
+//! (<https://github.com/mdn/data>) and the descriptors the specifications add
+//! to it (`NEW_DESCRIPTORS` in the private `gen/values.py`). Each at-rule below
+//! defines its own closed set of descriptor names; `validate` checks an
+//! at-rule's declarations against the matching set. Sorted, for binary search.
 
 const COUNTER_STYLE: &[&str] = &[
     "additive-symbols",
@@ -22,17 +22,31 @@ const FONT_FACE: &[&str] = &[
     "font-display",
     "font-family",
     "font-feature-settings",
+    "font-language-override",
+    "font-named-instance",
+    "font-size",
     "font-stretch",
     "font-style",
     "font-variation-settings",
     "font-weight",
+    "font-width",
     "line-gap-override",
     "size-adjust",
     "src",
+    "subscript-position-override",
+    "subscript-size-override",
+    "superscript-position-override",
+    "superscript-size-override",
     "unicode-range",
 ];
 const FONT_PALETTE_VALUES: &[&str] = &["base-palette", "font-family", "override-colors"];
-const PAGE: &[&str] = &["bleed", "marks", "page-orientation", "size"];
+const PAGE: &[&str] = &[
+    "bleed",
+    "marks",
+    "page-margin-safety",
+    "page-orientation",
+    "size",
+];
 const PROPERTY: &[&str] = &["inherits", "initial-value", "syntax"];
 const VIEW_TRANSITION: &[&str] = &["navigation", "types"];
 

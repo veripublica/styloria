@@ -1691,6 +1691,19 @@ mod tests {
     }
 
     #[test]
+    fn the_specifications_newer_shorthands_set_their_longhands() {
+        let c = cascade(&["img { width: 1px } img { size: 2px 3px; min-size: auto }"]);
+        assert_eq!(ask(&c, IMG, None, "width").1, "size: 2px 3px");
+        assert_eq!(ask(&c, IMG, None, "height").1, "size: 2px 3px");
+        assert_eq!(ask(&c, IMG, None, "min-height").0, Match::Yes);
+        assert_eq!(ask(&c, IMG, None, "max-width").0, Match::No);
+        let c = cascade(&["img { animation-delay: 1s 2s }"]);
+        assert_eq!(ask(&c, IMG, None, "animation-delay-end").0, Match::Yes);
+        let c = cascade(&["img { animation: x 1s }"]);
+        assert_eq!(ask(&c, IMG, None, "animation-delay-start").0, Match::Yes);
+    }
+
+    #[test]
     fn shorthands_set_their_longhands() {
         let c =
             cascade(&["img { border: 1px solid } .pic { padding: 0 } img { font: 12px serif }"]);

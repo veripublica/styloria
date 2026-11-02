@@ -91,7 +91,8 @@ pub(crate) const SHORTHANDS: &[(&str, &[&str])] = &[
     (
         "animation",
         &[
-            "animation-delay",
+            "animation-delay-end",
+            "animation-delay-start",
             "animation-direction",
             "animation-duration",
             "animation-fill-mode",
@@ -101,6 +102,10 @@ pub(crate) const SHORTHANDS: &[(&str, &[&str])] = &[
             "animation-timeline",
             "animation-timing-function",
         ],
+    ),
+    (
+        "animation-delay",
+        &["animation-delay-end", "animation-delay-start"],
     ),
     (
         "animation-range",
@@ -357,6 +362,10 @@ pub(crate) const SHORTHANDS: &[(&str, &[&str])] = &[
         "corner-top-shape",
         &["corner-top-left-shape", "corner-top-right-shape"],
     ),
+    (
+        "event-trigger",
+        &["event-trigger-name", "event-trigger-source"],
+    ),
     ("flex", &["flex-basis", "flex-grow", "flex-shrink"]),
     ("flex-flow", &["flex-direction", "flex-wrap"]),
     (
@@ -491,6 +500,8 @@ pub(crate) const SHORTHANDS: &[(&str, &[&str])] = &[
             "mask-border-width",
         ],
     ),
+    ("max-size", &["max-height", "max-width"]),
+    ("min-size", &["min-height", "min-width"]),
     (
         "offset",
         &[
@@ -534,6 +545,10 @@ pub(crate) const SHORTHANDS: &[(&str, &[&str])] = &[
     ("place-items", &["align-items", "justify-items"]),
     ("place-self", &["align-self", "justify-self"]),
     (
+        "pointer-timeline",
+        &["pointer-timeline-axis", "pointer-timeline-name"],
+    ),
+    (
         "position-try",
         &["position-try-fallbacks", "position-try-order"],
     ),
@@ -575,6 +590,7 @@ pub(crate) const SHORTHANDS: &[(&str, &[&str])] = &[
         "scroll-timeline",
         &["scroll-timeline-axis", "scroll-timeline-name"],
     ),
+    ("size", &["height", "width"]),
     ("text-box", &["text-box-edge", "text-box-trim"]),
     (
         "text-decoration",
@@ -611,6 +627,15 @@ pub(crate) const SHORTHANDS: &[(&str, &[&str])] = &[
     (
         "timeline-trigger-active-range",
         &[
+            "timeline-trigger-active-range-end",
+            "timeline-trigger-active-range-start",
+        ],
+    ),
+    (
+        "timeline-trigger-range",
+        &[
+            "timeline-trigger-activation-range-end",
+            "timeline-trigger-activation-range-start",
             "timeline-trigger-active-range-end",
             "timeline-trigger-active-range-start",
         ],

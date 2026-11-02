@@ -29,7 +29,7 @@ for d in styloria::validate_parsed_stylesheet(&sheet) {
     println!("{line}:{column} {:?} {}", d.kind, d.name);
 }
 // 1:12 InvalidValue { at_rule: None, valid_under: None } color
-// 1:18 UnknownProperty colr
+// 1:18 UnknownProperty { valid_under: None } colr
 ```
 
 The API can still change before 1.0. The full picture, including what it
