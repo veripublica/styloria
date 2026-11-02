@@ -26,6 +26,7 @@ pub mod at_rule;
 pub mod cascade;
 #[cfg(feature = "legacy-cjk")]
 mod cjk;
+mod css2_syntaxes;
 pub mod decode;
 mod descriptors;
 mod encodings;
@@ -90,6 +91,6 @@ pub use validate::{
     validate_parsed_stylesheet, validate_stylesheet,
 };
 pub use values::{
-    MAX_VALUE_STEPS, MDN_DATA_VERSION, UnknownValue, ValueCheck, check_declaration,
-    check_descriptor, check_value,
+    MAX_VALUE_STEPS, MDN_DATA_VERSION, UnknownValue, ValidUnder, ValueCheck, check_declaration,
+    check_descriptor, check_value, descriptor_valid_under, valid_under,
 };

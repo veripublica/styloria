@@ -28,7 +28,7 @@ for d in styloria::validate_parsed_stylesheet(&sheet) {
     let (line, column) = d.span.start_line_col(css);
     println!("{line}:{column} {:?} {}", d.kind, d.name);
 }
-// 1:12 InvalidValue color
+// 1:12 InvalidValue { at_rule: None, valid_under: None } color
 // 1:18 UnknownProperty colr
 ```
 

@@ -152,11 +152,17 @@ whether a list is empty, `all` or `only all`.
 - `validate_stylesheet(css)`, `validate_parsed_stylesheet(&sheet)`,
   `validate_declaration_list(css)`, `validate_parsed_block(&items)` return
   `Diagnostic`s, each with `span`, `kind` and `name`. For `InvalidValue`, the
-  span covers the value and `name` is the property.
+  span covers the value and `name` is the property. Its `at_rule` names the
+  at-rule the declaration is in, and its `valid_under` says if an older reading
+  would take the value: `ValidUnder::Css2` (the 1998 Recommendation) or
+  `ValidUnder::QuirksMode` (CSS Values 4 Appendix C). A browser reading to
+  today's specs still drops it; what that means for a document is the caller's.
 - `check_value`, `check_declaration`, `check_descriptor` return `ValueCheck`:
-  `Valid`, `Invalid` or `Unknown(UnknownValue)`.
+  `Valid`, `Invalid` or `Unknown(UnknownValue)`. `valid_under` and
+  `descriptor_valid_under` give the older reading of one value.
 
-`DiagnosticKind`: `UnknownProperty`, `UnknownDescriptor`, `InvalidValue`,
+`DiagnosticKind`: `UnknownProperty`, `UnknownDescriptor { at_rule }`,
+`InvalidValue { at_rule, valid_under }`,
 `UnknownAtRule`, `MisplacedAtRule`, `UnknownMediaFeature`,
 `ImportantInKeyframe`.
 
@@ -168,7 +174,8 @@ Grammars come from mdn-data (`MDN_DATA_VERSION`, now 2.37.2), read in CSS Values
 4's value definition syntax, with cited corrections where the specifications
 are ahead of it. A value in a specification's grammar is Valid even if no engine
 has it yet. The CSS-wide keywords fit properties, and descriptors only in
-`@page`.
+`@page`. CSS2's grammars come from its own Appendices F and G, and are used only
+for `valid_under`.
 
 ### References
 

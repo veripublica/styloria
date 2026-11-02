@@ -42,6 +42,10 @@
 //! inherited (CSS Fonts 4 §4.1). `@page` is the exception, left as it is:
 //! engines differ on `size: inherit`, and the rule takes properties too.
 //!
+//! A value found Invalid may still have an older reading: [`valid_under`] and
+//! [`descriptor_valid_under`] tell whether CSS2's own grammar, or quirks mode,
+//! would take it.
+//!
 //! What remains possible is a keyword or function newer than the grammars:
 //! mdn-data's version is there so such a case can be traced.
 
@@ -52,6 +56,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::OnceLock;
 
+use crate::css2_syntaxes::{CSS2_PROPERTY_SYNTAXES, CSS2_TYPE_SYNTAXES};
 use crate::known_properties::is_known_property;
 use crate::narrowed::Relaxed;
 use crate::parser::{BlockKind, ComponentValue, Declaration, unprefixed};
@@ -111,6 +116,22 @@ pub enum ValueCheck {
     /// declaration.
     Invalid,
     Unknown(UnknownValue),
+}
+
+/// Where a value that [`ValueCheck::Invalid`] rejects would be valid after all.
+///
+/// A browser still drops such a value in a document it reads to today's specs.
+/// This names the older reading, for whoever has to weigh it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ValidUnder {
+    /// CSS2's own grammar (REC-CSS2-19980512, 1998), which EPUB 2 cites:
+    /// `@font-face { font-family: Arial, sans-serif }`, `display: compact`,
+    /// `text-align: "ab"`. CSS 2.1 and later dropped it.
+    Css2,
+    /// Quirks mode: a unitless number as a px length, in the properties of CSS
+    /// Values 4 Appendix C (`width: 150`). HTML's parser sets that mode for
+    /// `text/html` documents only.
+    QuirksMode,
 }
 
 /// Why a value is neither certainly valid nor certainly invalid.
@@ -200,6 +221,134 @@ pub fn check_descriptor(
     unsettled(verdict, value, |v| {
         check_descriptor_as_written(at_rule, name, v)
     })
+}
+
+/// Where `value` would be valid after all, when [`check_value`] calls it
+/// [`Invalid`](ValueCheck::Invalid); `None` otherwise.
+pub fn valid_under(property: &str, value: &[Spanned<ComponentValue<'_>>]) -> Option<ValidUnder> {
+    if check_value(property, value) != ValueCheck::Invalid {
+        return None;
+    }
+    invalid_property_valid_under(property, value)
+}
+
+/// Where `value` would be valid after all, when [`check_descriptor`] calls it
+/// [`Invalid`](ValueCheck::Invalid); `None` otherwise.
+pub fn descriptor_valid_under(
+    at_rule: &str,
+    name: &str,
+    value: &[Spanned<ComponentValue<'_>>],
+) -> Option<ValidUnder> {
+    if check_descriptor(at_rule, name, value) != ValueCheck::Invalid {
+        return None;
+    }
+    invalid_descriptor_valid_under(at_rule, name, value)
+}
+
+/// [`valid_under`] for a value already found Invalid.
+pub(crate) fn invalid_property_valid_under(
+    property: &str,
+    value: &[Spanned<ComponentValue<'_>>],
+) -> Option<ValidUnder> {
+    let property = property.to_ascii_lowercase();
+    if fits_css2(&property, &significant(value)) {
+        return Some(ValidUnder::Css2);
+    }
+    if !QUIRKY_LENGTH_PROPERTIES.contains(&property.as_str()) {
+        return None;
+    }
+    let read: Vec<ComponentValue<'_>> = significant(value)
+        .into_iter()
+        .map(with_quirky_lengths)
+        .collect();
+    let items: Vec<&ComponentValue<'_>> = read.iter().collect();
+    (uncached(&property, &items) == ValueCheck::Valid).then_some(ValidUnder::QuirksMode)
+}
+
+/// [`descriptor_valid_under`] for a value already found Invalid. CSS2's
+/// at-rules with declarations are `@font-face` and `@page`, whose `size` and
+/// `marks` it lists as properties. Quirks mode is about properties in style
+/// rules, so it does not come in here.
+pub(crate) fn invalid_descriptor_valid_under(
+    at_rule: &str,
+    name: &str,
+    value: &[Spanned<ComponentValue<'_>>],
+) -> Option<ValidUnder> {
+    let name = name.to_ascii_lowercase();
+    let key = match unprefixed(at_rule).to_ascii_lowercase().as_str() {
+        "font-face" => format!("@font-face/{name}"),
+        "page" => name,
+        _ => return None,
+    };
+    fits_css2(&key, &significant(value)).then_some(ValidUnder::Css2)
+}
+
+/// Whether the value fits CSS2's grammar for `key`. Only the strict match
+/// counts: every type in that table is defined.
+fn fits_css2(key: &str, items: &[&ComponentValue<'_>]) -> bool {
+    let g = css2_grammars();
+    let Some(Some(node)) = g.properties.get(key) else {
+        return false;
+    };
+    let matcher = Matcher::new(g, false, step_budget(items, MAX_VALUE_DEPTH));
+    matcher.full(node, items, 0) && !matcher.exhausted.get()
+}
+
+/// CSS Values 4 Appendix C's list. Not the shorthands that include these
+/// (`background`), which the appendix leaves out by name.
+const QUIRKY_LENGTH_PROPERTIES: [&str; 33] = [
+    "background-position",
+    "border-spacing",
+    "border-top-width",
+    "border-right-width",
+    "border-bottom-width",
+    "border-left-width",
+    "border-width",
+    "bottom",
+    "clip",
+    "font-size",
+    "height",
+    "left",
+    "letter-spacing",
+    "margin-right",
+    "margin-left",
+    "margin-top",
+    "margin-bottom",
+    "margin",
+    "max-height",
+    "max-width",
+    "min-height",
+    "min-width",
+    "padding-top",
+    "padding-right",
+    "padding-bottom",
+    "padding-left",
+    "padding",
+    "right",
+    "text-indent",
+    "top",
+    "vertical-align",
+    "width",
+    "word-spacing",
+];
+
+/// `v` with a number read as px, as quirks mode reads it. Not inside functional
+/// notations; `clip: rect(1 2 3 4)`, the one exception, is Unknown here anyway,
+/// since `<shape>`'s pieces are not read.
+fn with_quirky_lengths<'a>(v: &ComponentValue<'a>) -> ComponentValue<'a> {
+    match v {
+        ComponentValue::Token(Token::Number {
+            value,
+            num_type,
+            repr,
+        }) => ComponentValue::Token(Token::Dimension {
+            value: *value,
+            num_type: *num_type,
+            unit: "px".into(),
+            repr,
+        }),
+        other => other.clone(),
+    }
 }
 
 /// An Invalid `verdict` made [`UnknownValue::NarrowedIdent`] when the value,
@@ -591,16 +740,28 @@ struct Grammars {
 
 fn grammars() -> &'static Grammars {
     static G: OnceLock<Grammars> = OnceLock::new();
-    G.get_or_init(|| {
+    G.get_or_init(|| read_grammars(PROPERTY_SYNTAXES, TYPE_SYNTAXES))
+}
+
+fn css2_grammars() -> &'static Grammars {
+    static G: OnceLock<Grammars> = OnceLock::new();
+    G.get_or_init(|| read_grammars(CSS2_PROPERTY_SYNTAXES, CSS2_TYPE_SYNTAXES))
+}
+
+fn read_grammars(
+    property_syntaxes: &'static [(&'static str, &'static str)],
+    type_syntaxes: &'static [(&'static str, &'static str)],
+) -> Grammars {
+    {
         let read = |list: &'static [(&'static str, &'static str)]| {
             list.iter()
                 .map(|(n, s)| (*n, grammar::parse(s)))
                 .collect::<HashMap<_, _, Quick>>()
         };
-        let properties = read(PROPERTY_SYNTAXES);
-        let types = read(TYPE_SYNTAXES);
+        let properties = read(property_syntaxes);
+        let types = read(type_syntaxes);
         let mut functions: HashSet<String, Quick> = MATH.iter().map(|m| m.to_string()).collect();
-        for name in TYPE_SYNTAXES
+        for name in type_syntaxes
             .iter()
             .filter_map(|(n, _)| n.strip_suffix("()"))
         {
@@ -614,7 +775,7 @@ fn grammars() -> &'static Grammars {
             types,
             functions,
         }
-    })
+    }
 }
 
 fn collect_functions(node: &Node, out: &mut HashSet<String, Quick>) {
@@ -1081,6 +1242,8 @@ fn is_base_type(name: &str) -> bool {
             | "zero"
             | "ident"
             | "custom-ident"
+            | "css2-family-word"
+            | "css2-font-weight"
             | "family-name-whole"
             | "family-name-start"
             | "text-align-char"
@@ -1166,6 +1329,13 @@ fn base_type(name: &str, range: Option<Range>, v: &ComponentValue<'_>) -> Option
         "ident" | "ident-token" => matches!(token, Some(Token::Ident(_))),
         "custom-ident" => matches!(token, Some(Token::Ident(w))
             if !is_one_of(w, &CSS_WIDE) && !w.eq_ignore_ascii_case("default")),
+        "css2-family-word" => matches!(token, Some(Token::Ident(w))
+            if !w.eq_ignore_ascii_case("inherit")),
+        // CSS2 §15.2.4 spells these out: 100, 200, … 900.
+        "css2-font-weight" => {
+            matches!(token, Some(Token::Number { value, num_type: NumericType::Integer, .. })
+            if (100.0..=900.0).contains(value) && value % 100.0 == 0.0)
+        }
         "family-name-whole" => matches!(token, Some(Token::Ident(w))
             if !is_one_of(w, &CSS_WIDE)
                 && !w.eq_ignore_ascii_case("default")

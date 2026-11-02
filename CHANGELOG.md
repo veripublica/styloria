@@ -9,6 +9,17 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`DiagnosticKind::InvalidValue` says where a value came from and where it
+  would fit.** It is now `InvalidValue { at_rule, valid_under }`, which breaks
+  any code matching the old unit variant. `at_rule` names the at-rule (`None` in
+  a style rule). `valid_under` is a new `ValidUnder`: `Css2` when CSS2's own
+  grammar (1998) takes the value, such as `@font-face { font-family: Arial,
+  sans-serif }` or `display: compact`, and `QuirksMode` for a unitless number in
+  a property of CSS Values 4 Appendix C, such as `width: 150`.
+- `valid_under` and `descriptor_valid_under` ask the same of one value.
+
 ### Changed
 
 - **Descriptors no longer take the CSS-wide keywords.** `@font-face {

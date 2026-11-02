@@ -50,7 +50,10 @@ use crate::descriptors::descriptors_for;
 use crate::known_properties::is_known_property;
 use crate::parser::{self, BlockItem, Rule, Stylesheet};
 use crate::span::{Span, Spanned};
-use crate::values::{ValueCheck, check_declaration, check_descriptor};
+use crate::values::{
+    ValidUnder, ValueCheck, check_declaration, check_descriptor, invalid_descriptor_valid_under,
+    invalid_property_valid_under,
+};
 
 /// One validation finding, located by the source [`Span`] it concerns.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,7 +79,14 @@ pub enum DiagnosticKind {
     /// grammar, so a browser drops it. The span covers the value's bytes
     /// exactly (without `!important`), so slicing the source with it gives
     /// the value as written; `name` is the property or descriptor.
-    InvalidValue,
+    InvalidValue {
+        /// The at-rule whose declaration this is, canonical and without the
+        /// `@` (`"font-face"`); `None` in a style rule. `@page` also takes
+        /// properties, and those say `"page"` too.
+        at_rule: Option<&'static str>,
+        /// Where the value would be valid after all, if anywhere.
+        valid_under: Option<ValidUnder>,
+    },
     /// An at-rule no CSS specification defines, so a browser ignores it and
     /// everything in its block: `@medai`, `@fontface`. Vendor-prefixed names
     /// (`@-moz-document`) are not reported. The span is the at-keyword;
@@ -274,9 +284,19 @@ fn check_value(d: &parser::Declaration<'_>, vocab: &Vocab, out: &mut Vec<Diagnos
     let (Some(first), Some(last)) = (d.value.first(), d.value.last()) else {
         return;
     };
+    let (at_rule, valid_under) = match vocab {
+        Vocab::Property => (None, invalid_property_valid_under(&d.name, &d.value)),
+        Vocab::Descriptor { at_rule, .. } => (
+            Some(*at_rule),
+            invalid_descriptor_valid_under(at_rule, &d.name, &d.value),
+        ),
+    };
     out.push(Diagnostic {
         span: Span::new(first.span.start, last.span.end),
-        kind: DiagnosticKind::InvalidValue,
+        kind: DiagnosticKind::InvalidValue {
+            at_rule,
+            valid_under,
+        },
         name: d.name.to_string(),
     });
 }
@@ -316,6 +336,12 @@ fn check_name(name: &str, span: Span, vocab: &Vocab, out: &mut Vec<Diagnostic>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An invalid value in a style rule, with no older reading.
+    const INVALID: DiagnosticKind = DiagnosticKind::InvalidValue {
+        at_rule: None,
+        valid_under: None,
+    };
 
     fn unknown_names(css: &str) -> Vec<String> {
         validate_stylesheet(css)
@@ -379,10 +405,7 @@ mod tests {
         // then not a colour, which is what gets reported.
         let d = validate_stylesheet("p { color: red font-eight: bold }");
         assert_eq!(d.len(), 1);
-        assert_eq!(
-            (d[0].kind, d[0].name.as_str()),
-            (DiagnosticKind::InvalidValue, "color")
-        );
+        assert_eq!((d[0].kind, d[0].name.as_str()), (INVALID, "color"));
     }
 
     #[test]
@@ -706,15 +729,21 @@ mod tests {
         assert_eq!(
             got,
             [
-                (DiagnosticKind::InvalidValue, "width", "banana"),
+                (INVALID, "width", "banana"),
                 (DiagnosticKind::UnknownProperty, "colr", "colr"),
-                (DiagnosticKind::InvalidValue, "font-style", "bold"),
+                (INVALID, "font-style", "bold"),
             ]
         );
         // The `style` attribute too.
         let d = validate_declaration_list("height: 102; width: 1px");
         assert_eq!(d.len(), 1);
-        assert_eq!(d[0].kind, DiagnosticKind::InvalidValue);
+        assert_eq!(
+            d[0].kind,
+            DiagnosticKind::InvalidValue {
+                at_rule: None,
+                valid_under: Some(ValidUnder::QuirksMode),
+            }
+        );
     }
 
     #[test]
@@ -727,14 +756,54 @@ mod tests {
             .map(|d| (d.kind, d.name.clone(), d.span.slice(css).to_string()))
             .collect();
         let want = [
-            ("font-weight", "bolder"),
-            ("size", "huge"),
-            ("margin", "banana"),
-            ("pad", "-1 \"0\""),
+            ("font-face", "font-weight", "bolder"),
+            ("page", "size", "huge"),
+            ("page", "margin", "banana"),
+            ("counter-style", "pad", "-1 \"0\""),
         ];
         assert_eq!(
             got,
-            want.map(|(n, v)| (DiagnosticKind::InvalidValue, n.to_string(), v.to_string()))
+            want.map(|(at, n, v)| (
+                DiagnosticKind::InvalidValue {
+                    at_rule: Some(at),
+                    valid_under: None,
+                },
+                n.to_string(),
+                v.to_string()
+            ))
         );
+    }
+
+    #[test]
+    fn an_invalid_value_says_where_it_came_from_and_where_it_would_fit() {
+        let css = "@font-face { font-family: Arial, sans-serif; font-weight: inherit }\n\
+                   @font-face { font-family: \"Berkeley\" sans-serif }\n\
+                   @page { size: inherit; margin: 1 }\n\
+                   p { width: 150; font-family: \"a\" b; display: compact; border-collapse: 0 }\n\
+                   @media print { q { height: 2 } }";
+        let got: Vec<_> = validate_stylesheet(css)
+            .iter()
+            .map(|d| match d.kind {
+                DiagnosticKind::InvalidValue {
+                    at_rule,
+                    valid_under,
+                } => (d.name.clone(), at_rule, valid_under),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        let css2 = Some(ValidUnder::Css2);
+        let quirks = Some(ValidUnder::QuirksMode);
+        let want = [
+            ("font-family", Some("font-face"), css2),
+            ("font-weight", Some("font-face"), None),
+            ("font-family", Some("font-face"), None),
+            ("margin", Some("page"), None),
+            ("width", None, quirks),
+            ("font-family", None, None),
+            ("display", None, css2),
+            ("border-collapse", None, None),
+            ("height", None, quirks),
+        ];
+        assert_eq!(got, want.map(|(n, a, u)| (n.to_string(), a, u)));
     }
 }

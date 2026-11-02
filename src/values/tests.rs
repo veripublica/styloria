@@ -476,3 +476,168 @@ fn column_width_keywords_are_unsettled() {
         );
     }
 }
+
+fn decl_value(decl: &'static str) -> crate::parser::Declaration<'static> {
+    match crate::parse_block_contents(decl).0.into_iter().next() {
+        Some(crate::BlockItem::Declaration(d)) => d.node,
+        other => panic!("{decl}: {other:?}"),
+    }
+}
+
+fn property_under(decl: &str) -> Option<ValidUnder> {
+    let d = decl_value(Box::leak(decl.to_string().into_boxed_str()));
+    valid_under(&d.name, &d.value)
+}
+
+fn descriptor_under(at_rule: &str, decl: &str) -> Option<ValidUnder> {
+    let d = decl_value(Box::leak(decl.to_string().into_boxed_str()));
+    descriptor_valid_under(at_rule, &d.name, &d.value)
+}
+
+/// CSS2 §15.3.2's descriptors take lists and `all`; today's take one value.
+#[test]
+fn css2_font_descriptors() {
+    for decl in [
+        "font-family: 'Arial', sans-serif",
+        "font-family: Arial, Helvetica",
+        "font-family: serif",
+        "font-weight: all",
+        "font-weight: 400, 700",
+        "font-style: all",
+        "font-style: normal, italic",
+        "FONT-STYLE: Oblique, Normal",
+    ] {
+        assert_eq!(
+            descriptor_under("font-face", decl),
+            Some(ValidUnder::Css2),
+            "{decl}"
+        );
+    }
+    for decl in [
+        // No grammar in any version.
+        "font-family: \"Berkeley\" sans-serif",
+        "font-family: 'a',",
+        "font-family: ,a",
+        "font-weight: 450, 700",
+        // A descriptor never took `inherit`, not even in CSS2.
+        "font-family: inherit",
+        "font-family: a, inherit",
+        "font-weight: inherit",
+        // Valid today, so there is nothing to explain.
+        "font-family: Gentium",
+        "font-weight: bold",
+    ] {
+        assert_eq!(descriptor_under("font-face", decl), None, "{decl}");
+    }
+    assert_eq!(descriptor_under("counter-style", "system: banana"), None);
+}
+
+#[test]
+fn css2_properties() {
+    for decl in [
+        "text-align: \"ab\"",
+        "display: compact",
+        "display: marker",
+        "font-stretch: wider",
+    ] {
+        assert_eq!(property_under(decl), Some(ValidUnder::Css2), "{decl}");
+    }
+    for decl in [
+        "text-align: axis",
+        "font-style: bold",
+        "float: center",
+        "text-justify: inter-ideograph",
+        "font-family: \"Berkeley\" sans-serif, serif",
+        "color: 12px",
+        "colr: red",
+    ] {
+        assert_eq!(property_under(decl), None, "{decl}");
+    }
+}
+
+/// CSS Values 4 Appendix C.
+#[test]
+fn quirky_lengths() {
+    for decl in [
+        "width: 150",
+        "WIDTH: 150",
+        "height: 1.5",
+        "font-size: .8",
+        "margin: 1 2px",
+        "margin-top: -5",
+        "padding: 1 2 3 4",
+        "text-indent: 20",
+        "border-width: 1 2",
+        "border-spacing: 2",
+        "vertical-align: 5",
+        "background-position: 1 2",
+    ] {
+        assert_eq!(property_under(decl), Some(ValidUnder::QuirksMode), "{decl}");
+    }
+    for decl in [
+        // Not on the list.
+        "border-collapse: 0",
+        "background: 1 2",
+        "border: 1 solid red",
+        "border-top: 1 solid red",
+        "font: 12 serif",
+        "column-width: 10",
+        "max-inline-size: 10",
+        // Not inside a function.
+        "width: calc(150)",
+        "width: calc(150 + 1px)",
+        // A quirky length is still a length.
+        "width: -5",
+        "width: 1 2",
+        "width: banana",
+        // Unknown, not Invalid: `<shape>`'s pieces are not read.
+        "clip: rect(1 2 3 4)",
+        // Valid today.
+        "width: 0",
+        "width: 150px",
+        "line-height: 1.5",
+    ] {
+        assert_eq!(property_under(decl), None, "{decl}");
+    }
+    // Appendix C is about properties; a descriptor is never quirky.
+    assert_eq!(descriptor_under("font-face", "font-weight: 1 2"), None);
+    assert_eq!(descriptor_under("view-transition", "navigation: 1"), None);
+}
+
+/// Every CSS2 row must read, and every type in it must be defined or a base
+/// type: [`fits_css2`] counts only the strict match.
+#[test]
+fn every_css2_grammar_is_complete() {
+    fn walk(node: &Node, g: &Grammars, at: &str) {
+        match node {
+            Node::Keyword(_) | Node::Literal(_) => {}
+            Node::Type { name, .. } => assert!(
+                is_base_type(name) || matches!(g.types.get(name.as_str()), Some(Some(_))),
+                "{at}: <{name}>"
+            ),
+            Node::Property(p) => assert!(
+                matches!(g.properties.get(p.as_str()), Some(Some(_))),
+                "{at}: <'{p}'>"
+            ),
+            Node::Function(_, n)
+            | Node::SquareBlock(n)
+            | Node::ParenBlock(n)
+            | Node::NonEmpty(n) => {
+                walk(n, g, at);
+            }
+            Node::Repeat { node, .. } => walk(node, g, at),
+            Node::Seq(v) | Node::AllOf(v) | Node::AnyOf(v) | Node::OneOf(v) => {
+                for n in v {
+                    walk(n, g, at);
+                }
+            }
+        }
+    }
+    let g = css2_grammars();
+    for (name, node) in g.properties.iter().chain(g.types.iter()) {
+        let node = node
+            .as_ref()
+            .unwrap_or_else(|| panic!("{name} does not read"));
+        walk(node, g, name);
+    }
+}
