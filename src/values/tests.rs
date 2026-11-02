@@ -243,7 +243,43 @@ fn descriptor_values() {
         ("page", "margin: banana", Invalid),
         ("property", "inherits: false", Valid),
         ("property", "inherits: maybe", Invalid),
-        ("font-face", "font-weight: inherit", Valid),
+        ("font-face", "font-weight: inherit", Invalid),
+        ("font-face", "font-style: initial", Invalid),
+        ("font-face", "font-display: unset", Invalid),
+        ("font-face", "src: inherit", Invalid),
+        ("counter-style", "system: inherit", Invalid),
+        ("property", "inherits: inherit", Invalid),
+        ("font-palette-values", "font-family: inherit", Invalid),
+        ("view-transition", "navigation: revert", Invalid),
+        ("page", "size: inherit", Valid),
+        ("page", "margin: inherit", Valid),
+        // A keyword is out as the whole family name, not as part of one.
+        ("font-face", "font-family: serif", Invalid),
+        ("font-face", "font-family: SANS-SERIF", Invalid),
+        ("font-face", "font-family: system-ui", Invalid),
+        ("font-face", "font-family: math", Invalid),
+        ("font-face", "font-family: INHERIT", Invalid),
+        ("font-face", "font-family: default", Invalid),
+        ("font-face", "font-family: revert-rule", Invalid),
+        ("font-face", "font-family: serif foo", Invalid),
+        ("font-face", "font-family: 'sans-serif'", Valid),
+        ("font-face", "font-family: Sans Serif", Valid),
+        ("font-face", "font-family: foo serif", Valid),
+        ("font-face", "font-family: inherit simple", Valid),
+        ("font-face", "font-family: simple default", Valid),
+        ("font-face", "font-family: caption", Valid),
+        ("font-face", "font-family: ui-serif", Valid),
+        ("font-face", "font-family: 'Arial', sans-serif", Invalid),
+        ("font-palette-values", "font-family: serif", Invalid),
+        ("font-face", "src: local(serif)", Invalid),
+        ("font-face", "src: local(inherit)", Invalid),
+        ("font-face", "src: local('serif')", Valid),
+        ("font-face", "src: local(inherit A)", Valid),
+        ("font-face", "src: local(serif), url(a.ttf)", Valid),
+        // CSS Fonts 4 §4.4, §4.5.
+        ("font-face", "font-style: auto", Valid),
+        ("font-face", "font-style: left", Valid),
+        ("font-face", "font-weight: auto", Valid),
     ] {
         assert_eq!(descriptor(at, decl), want, "@{at} {decl}");
     }
@@ -332,4 +368,111 @@ fn narrowed_ident_code_points_are_unknown() {
             "color: #12‣",
         ],
     );
+}
+
+/// The family names of WPT's css/css-fonts/test_font_family_parsing.html and
+/// font-family-invalid.html, as a property.
+#[test]
+fn family_names_follow_the_tests() {
+    all(
+        ValueCheck::Valid,
+        &[
+            "font-family: serif",
+            "font-family: Serif",
+            "font-family: arial, helvetica, sans-serif",
+            "font-family: normal",
+            "font-family: caption",
+            "font-family: simple, default bongo",
+            "font-family: simple, bongo initial",
+            "font-family: simple inherit",
+            "font-family: inherit simple",
+            "font-family: unset simple",
+            "font-family: \"inherit\", \"serif\"",
+            "font: 12px simple inherit",
+            "font-family: Sans Serif",
+            "font-family: inherit",
+            "font-family: revert-rule",
+        ],
+    );
+    all(
+        ValueCheck::Invalid,
+        &[
+            "font-family: cursive serif",
+            "font-family: serif foo",
+            "font-family: foo, serif bar",
+            "font: 12px serif foo",
+            "font-family: default",
+            "font-family: default, simple",
+            "font-family: simple, inherit",
+            "font-family: FirstName, Initial, LastName",
+            "font-family: FirstName, LastName, revert-rule",
+            "font-family: Hawaii 5-0, sans-serif",
+        ],
+    );
+}
+
+/// Values in a specification's grammar are Valid whether or not an engine has
+/// them yet; `text-align: justify-all` was the first.
+#[test]
+fn draft_values_are_valid() {
+    all(
+        ValueCheck::Valid,
+        &[
+            "font-style: left",
+            "font-style: right",
+            "font-style: oblique 10deg",
+            "text-align: \".\"",
+            "text-align: \".\" center",
+            "text-align: right \",\"",
+            "text-align: \"é\"",
+            "text-align: justify-all",
+            "color: revert-rule",
+            "border-top-width: hairline",
+            "border: hairline solid red",
+            "column-gap: thin",
+            "grid-row-gap: normal",
+            "float: block-start",
+            "clear: top",
+            "overscroll-behavior: chain none",
+            "text-justify: ruby no-compress",
+            "text-justify: distribute",
+            "vertical-align: first text-top",
+            "vertical-align: -0.5em",
+            "display: grid-lanes",
+            "display: inline-grid-lanes",
+            "fill: child",
+            "stroke: child(2)",
+            "d: \"M0 0\"",
+            "letter-spacing: 1%",
+            "word-spacing: 1%",
+            "tab-size: 1.5",
+        ],
+    );
+    all(
+        ValueCheck::Invalid,
+        &[
+            "text-align: \"ab\"",
+            "text-align: \"\"",
+            "text-align: axis",
+            "text-align: \".\" justify",
+            "font-style: bold",
+            "float: center",
+            "text-justify: inter-ideograph",
+            "column-width: 10%",
+            "width: 150",
+            "quotes: bikeshed-this",
+        ],
+    );
+}
+
+/// CSS Sizing 3 §3.4 is "likey to be dropped" (w3c/csswg-drafts#14574).
+#[test]
+fn column_width_keywords_are_unsettled() {
+    for decl in ["column-width: min-content", "columns: fit-content"] {
+        assert!(
+            matches!(check(decl), ValueCheck::Unknown(_)),
+            "{decl}: {:?}",
+            check(decl)
+        );
+    }
 }

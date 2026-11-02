@@ -36,8 +36,11 @@
 //!   or when that reading cannot be rebuilt: w3c/csswg-drafts#7129 is open.
 //!
 //! A custom property (`--*`) takes any value, and the CSS-wide keywords
-//! (`inherit`, `initial`, `unset`, `revert`, `revert-layer`) fit every
-//! property.
+//! (`inherit`, `initial`, `unset`, `revert`, `revert-layer`, `revert-rule`) fit
+//! every property. They fit no descriptor but what its own grammar allows:
+//! CSS Values 4 §4.1.1 gives them to properties, and a descriptor is not
+//! inherited (CSS Fonts 4 §4.1). `@page` is the exception, left as it is:
+//! engines differ on `size: inherit`, and the rule takes properties too.
 //!
 //! What remains possible is a keyword or function newer than the grammars:
 //! mdn-data's version is there so such a case can be traced.
@@ -442,7 +445,9 @@ fn uncached(property: &str, items: &[&ComponentValue<'_>]) -> ValueCheck {
     if let Some(reason) = unknown_before_matching(items, MAX_VALUE_DEPTH) {
         return ValueCheck::Unknown(reason);
     }
-    if let (1, ComponentValue::Token(Token::Ident(word))) = (items.len(), first)
+    let takes_css_wide = !property.starts_with('@') || property.starts_with("@page/");
+    if takes_css_wide
+        && let (1, ComponentValue::Token(Token::Ident(word))) = (items.len(), first)
         && CSS_WIDE.iter().any(|k| word.eq_ignore_ascii_case(k))
     {
         return ValueCheck::Valid;
@@ -476,7 +481,33 @@ fn uncached(property: &str, items: &[&ComponentValue<'_>]) -> ValueCheck {
     }
 }
 
-const CSS_WIDE: [&str; 5] = ["inherit", "initial", "unset", "revert", "revert-layer"];
+const CSS_WIDE: [&str; 6] = [
+    "inherit",
+    "initial",
+    "unset",
+    "revert",
+    "revert-layer",
+    "revert-rule",
+];
+
+/// `<generic-font-complete>` (CSS Fonts 4 §2.1.2), which an unquoted family
+/// name cannot be or start with. `<generic-font-incomplete>` (`ui-serif`, …)
+/// is not here: the same text excludes it, but all of WebKit, Gecko and Blink
+/// keep `@font-face { font-family: ui-serif }`, so that is not certain.
+const GENERIC_FAMILIES: [&str; 7] = [
+    "serif",
+    "sans-serif",
+    "system-ui",
+    "cursive",
+    "fantasy",
+    "math",
+    "monospace",
+];
+
+/// Whether `word` is a keyword in `set`, in any ASCII case.
+fn is_one_of(word: &str, set: &[&str]) -> bool {
+    set.iter().any(|k| word.eq_ignore_ascii_case(k))
+}
 
 /// Functions whose result is known only at computed-value time.
 const SUBSTITUTION: [&str; 5] = ["var", "env", "attr", "if", "inherit"];
@@ -1050,6 +1081,9 @@ fn is_base_type(name: &str) -> bool {
             | "zero"
             | "ident"
             | "custom-ident"
+            | "family-name-whole"
+            | "family-name-start"
+            | "text-align-char"
             | "dashed-ident"
             | "custom-property-name"
             | "string"
@@ -1131,7 +1165,17 @@ fn base_type(name: &str, range: Option<Range>, v: &ComponentValue<'_>) -> Option
         "zero" => matches!(token, Some(Token::Number { value, .. }) if *value == 0.0),
         "ident" | "ident-token" => matches!(token, Some(Token::Ident(_))),
         "custom-ident" => matches!(token, Some(Token::Ident(w))
-            if !CSS_WIDE.iter().chain(&["default"]).any(|k| w.eq_ignore_ascii_case(k))),
+            if !is_one_of(w, &CSS_WIDE) && !w.eq_ignore_ascii_case("default")),
+        "family-name-whole" => matches!(token, Some(Token::Ident(w))
+            if !is_one_of(w, &CSS_WIDE)
+                && !w.eq_ignore_ascii_case("default")
+                && !is_one_of(w, &GENERIC_FAMILIES)),
+        "family-name-start" => matches!(token, Some(Token::Ident(w))
+            if !is_one_of(w, &GENERIC_FAMILIES)),
+        // CSS Text 4 §7.1: "The string must be a single character". What
+        // counts as one beyond ASCII is left open: only plain ASCII is Invalid.
+        "text-align-char" => matches!(token, Some(Token::String(t))
+            if !t.is_empty() && (t.chars().count() == 1 || !t.is_ascii())),
         "dashed-ident" | "custom-property-name" => {
             matches!(token, Some(Token::Ident(w)) if w.starts_with("--"))
         }

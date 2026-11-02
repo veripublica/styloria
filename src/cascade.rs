@@ -31,7 +31,7 @@
 //!   rule keep their place in the order;
 //! - a logical property, which may stand for either physical one;
 //! - a vendor-prefixed property, which only some engines honour;
-//! - `revert` and `revert-layer`, which hand the property back to an earlier
+//! - `revert`, `revert-layer` and `revert-rule`, which hand the property back to an earlier
 //!   origin or layer.
 //!
 //! Shorthands set their longhands (`border` sets `border-top-width`), from a
@@ -167,7 +167,7 @@ pub enum UnknownReason {
     Logical,
     /// The declaration's property is vendor-prefixed.
     Prefixed,
-    /// The value is `revert` or `revert-layer`.
+    /// The value is `revert`, `revert-layer` or `revert-rule`.
     Revert,
     /// The rule's selector reads otherwise before w3c/csswg-drafts#7129,
     /// which took some code points at or above U+0080 out of the ident code
@@ -910,9 +910,16 @@ fn could_win<'p, 'c, 'e>(answer: &'p PropertyAnswer<'c, 'e>) -> &'p [Setter<'c, 
 fn is_css_wide(d: &Declaration<'_>) -> bool {
     let mut text = String::new();
     serialize_values(&d.value, &mut text);
-    ["inherit", "initial", "unset", "revert", "revert-layer"]
-        .iter()
-        .any(|k| text.eq_ignore_ascii_case(k))
+    [
+        "inherit",
+        "initial",
+        "unset",
+        "revert",
+        "revert-layer",
+        "revert-rule",
+    ]
+    .iter()
+    .any(|k| text.eq_ignore_ascii_case(k))
 }
 
 fn compare_styles(
@@ -1094,11 +1101,14 @@ impl Query {
     }
 }
 
-/// Whether a declaration's value is `revert` or `revert-layer` alone.
+/// Whether a declaration's value is `revert`, `revert-layer` or `revert-rule`
+/// alone.
 fn is_revert(d: &Declaration<'_>) -> bool {
     match d.value.as_slice() {
         [v] => matches!(&v.node, ComponentValue::Token(Token::Ident(w))
-            if w.eq_ignore_ascii_case("revert") || w.eq_ignore_ascii_case("revert-layer")),
+            if w.eq_ignore_ascii_case("revert")
+                || w.eq_ignore_ascii_case("revert-layer")
+                || w.eq_ignore_ascii_case("revert-rule")),
         _ => false,
     }
 }
@@ -1742,6 +1752,7 @@ mod tests {
                 vec![Logical, Prefixed],
             ),
             ("img { width: revert }", "width", vec![Revert]),
+            ("img { width: revert-rule }", "width", vec![Revert]),
             (
                 "@scope (body) { & img { width: 1px } }",
                 "width",

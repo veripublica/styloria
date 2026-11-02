@@ -7,6 +7,34 @@ styloria is pre-1.0, so new features and breaking changes both land as
 minor-version bumps (`0.x.0`), per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Descriptors no longer take the CSS-wide keywords.** `@font-face {
+  font-weight: inherit }` is Invalid now: CSS Values 4 gives those keywords to
+  properties, and a descriptor is not inherited. `@page` is left as it was.
+- **A generic family cannot be, or start, an unquoted family name.** `@font-face
+  { font-family: serif }`, `src: local(serif)` and `font-family: serif foo` are
+  Invalid (CSS Fonts 4 §2.1.1). `ui-serif` and the like stay Valid, since every
+  engine tested keeps them.
+
+### Fixed
+
+- **A keyword inside a longer family name is Valid.** `inherit simple`, `simple
+  default` and `local(inherit A)` were Invalid. Web Platform Tests and the
+  engines tested keep them, and w3c/csswg-drafts#13692 is open on the text.
+- `revert-rule` is a CSS-wide keyword (CSS Cascade 5 §7.3.6), in value checks and
+  in the cascade, where it is Unknown like `revert`.
+- Value checking follows the specifications' grammars for 51 more properties,
+  descriptors and types where mdn-data lags. Among them are `font-style: left`,
+  `text-align: "."`, `@font-face { font-style: auto }`, `<line-width>`'s
+  `hairline`, and the logical and page-float values of `float` and `clear`.
+  A value in a specification's grammar is Valid whether or not an engine has it
+  yet. `text-align: "ab"` is Invalid, as CSS Text 4 asks for one character.
+- `column-width: min-content` and its like are Unknown: the section adding them
+  is likely to be dropped (w3c/csswg-drafts#14574).
+
 ## [0.18.0] - 2026-11-01
 
 ### Added

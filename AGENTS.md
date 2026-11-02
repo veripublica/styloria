@@ -166,7 +166,9 @@ whether a list is empty, `all` or `only all`.
 
 Grammars come from mdn-data (`MDN_DATA_VERSION`, now 2.37.2), read in CSS Values
 4's value definition syntax, with cited corrections where the specifications
-are ahead of it.
+are ahead of it. A value in a specification's grammar is Valid even if no engine
+has it yet. The CSS-wide keywords fit properties, and descriptors only in
+`@page`.
 
 ### References
 

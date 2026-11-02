@@ -240,13 +240,16 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
     ("@font-face/font-stretch", "<font-stretch-absolute>{1,2}"),
     (
         "@font-face/font-style",
-        "normal | italic | oblique <angle>{0,2}",
+        "normal | italic | oblique <angle>{0,2} | auto | left | right",
     ),
     (
         "@font-face/font-variation-settings",
         "normal | [ <string> <number> ]#",
     ),
-    ("@font-face/font-weight", "<font-weight-absolute>{1,2}"),
+    (
+        "@font-face/font-weight",
+        "<font-weight-absolute>{1,2} | auto",
+    ),
     ("@font-face/line-gap-override", "normal | <percentage>"),
     ("@font-face/size-adjust", "<percentage>"),
     ("@font-face/src", "<font-src>"),
@@ -295,9 +298,12 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
     ),
     (
         "alignment-baseline",
-        "baseline | alphabetic | ideographic | middle | central | mathematical | text-before-edge | text-after-edge",
+        "baseline | alphabetic | ideographic | middle | central | mathematical | text-before-edge | text-after-edge | hanging | text-top | text-bottom",
     ),
-    ("all", "initial | inherit | unset | revert | revert-layer"),
+    (
+        "all",
+        "initial | inherit | unset | revert | revert-layer | revert-rule",
+    ),
     ("anchor-name", "none | <dashed-ident>#"),
     ("anchor-scope", "none | all | <dashed-ident>#"),
     ("animation", "<single-animation>#"),
@@ -332,7 +338,7 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
     ),
     (
         "appearance",
-        "none | auto | <compat-auto> | <compat-special>",
+        "none | auto | <compat-auto> | <compat-special> | base | base-select",
     ),
     ("aspect-ratio", "auto || <ratio>"),
     ("backdrop-filter", "none | <filter-value-list>"),
@@ -357,7 +363,7 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
     ("background-size", "<bg-size>#"),
     (
         "baseline-shift",
-        "<length-percentage> | sub | super | baseline",
+        "<length-percentage> | sub | super | baseline | top | center | bottom",
     ),
     ("baseline-source", "auto | first | last"),
     ("block-size", "<'width'>"),
@@ -490,7 +496,7 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
     ("caret-shape", "auto | bar | block | underscore"),
     (
         "clear",
-        "none | left | right | both | inline-start | inline-end",
+        "none | left | right | both | inline-start | inline-end | block-start | block-end | top | bottom | both-inline | both-block",
     ),
     ("clip", "<shape> | auto"),
     (
@@ -505,8 +511,8 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
         "normal | [ light | dark | <custom-ident> ]+ && only?",
     ),
     ("column-count", "<integer> | auto"),
-    ("column-fill", "auto | balance"),
-    ("column-gap", "normal | <length-percentage>"),
+    ("column-fill", "auto | balance | balance-all"),
+    ("column-gap", "normal | <length-percentage> | <line-width>"),
     ("column-height", "auto | <length [0,∞]>"),
     (
         "column-rule",
@@ -515,7 +521,7 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
     ("column-rule-color", "<color>"),
     ("column-rule-style", "<line-style>"),
     ("column-rule-width", "<line-width>"),
-    ("column-span", "none | all"),
+    ("column-span", "none | all | <integer [1,∞]> | auto"),
     ("column-width", "auto | <length [0,∞]>"),
     ("column-wrap", "auto | nowrap | wrap"),
     (
@@ -574,7 +580,7 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
     ),
     ("cx", "<length> | <percentage>"),
     ("cy", "<length> | <percentage>"),
-    ("d", "none | path(<string>)"),
+    ("d", "none | path(<string>) | <string>"),
     ("direction", "ltr | rtl"),
     (
         "display",
@@ -608,7 +614,10 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
     ("flex-line-count", "<integer [1,∞]>"),
     ("flex-shrink", "<number>"),
     ("flex-wrap", "nowrap | [ wrap | wrap-reverse ] || balance"),
-    ("float", "left | right | none | inline-start | inline-end"),
+    (
+        "float",
+        "left | right | none | inline-start | inline-end | block-start | block-end | top | bottom | snap-block | <snap-block()> | snap-inline | <snap-inline()> | footnote",
+    ),
     ("flood-color", "<color>"),
     ("flood-opacity", "<'opacity'>"),
     (
@@ -637,14 +646,17 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
         "auto | never | always | <absolute-size> | <length>",
     ),
     ("font-stretch", "<font-stretch-absolute>"),
-    ("font-style", "normal | italic | oblique <angle>?"),
+    (
+        "font-style",
+        "normal | italic | oblique <angle>? | left | right",
+    ),
     (
         "font-synthesis",
         "none | [ weight || style || small-caps || position]",
     ),
     ("font-synthesis-position", "auto | none"),
     ("font-synthesis-small-caps", "auto | none"),
-    ("font-synthesis-style", "auto | none"),
+    ("font-synthesis-style", "auto | none | oblique-only"),
     ("font-synthesis-weight", "auto | none"),
     (
         "font-variant",
@@ -694,12 +706,18 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
     ("grid-auto-rows", "<track-size>+"),
     ("grid-column", "<grid-line> [ / <grid-line> ]?"),
     ("grid-column-end", "<grid-line>"),
-    ("grid-column-gap", "<length-percentage>"),
+    (
+        "grid-column-gap",
+        "<length-percentage> | normal | <line-width>",
+    ),
     ("grid-column-start", "<grid-line>"),
     ("grid-gap", "<'grid-row-gap'> <'grid-column-gap'>?"),
     ("grid-row", "<grid-line> [ / <grid-line> ]?"),
     ("grid-row-end", "<grid-line>"),
-    ("grid-row-gap", "<length-percentage>"),
+    (
+        "grid-row-gap",
+        "<length-percentage> | normal | <line-width>",
+    ),
     ("grid-row-start", "<grid-line>"),
     (
         "grid-template",
@@ -724,7 +742,7 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
     ("hyphens", "none | manual | auto"),
     (
         "image-orientation",
-        "from-image | <angle> | [ <angle>? flip ]",
+        "from-image | <angle> | [ <angle>? flip ] | none | [ <angle> || flip ]",
     ),
     (
         "image-rendering",
@@ -774,7 +792,7 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
         "left",
         "auto | <length-percentage> | <anchor()> | <anchor-size()>",
     ),
-    ("letter-spacing", "normal | <length>"),
+    ("letter-spacing", "normal | <length> | <length-percentage>"),
     ("lighting-color", "<color>"),
     ("line-break", "auto | loose | normal | strict | anywhere"),
     ("line-clamp", "none | <integer>"),
@@ -808,7 +826,10 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
         "<length-percentage> | auto | <anchor-size()>",
     ),
     ("margin-top", "<length-percentage> | auto | <anchor-size()>"),
-    ("margin-trim", "none | in-flow | all"),
+    (
+        "margin-trim",
+        "none | in-flow | all | block | [ block-start || block-end ]",
+    ),
     ("marker", "none | <url>"),
     ("marker-end", "none | <url>"),
     ("marker-mid", "none | <url>"),
@@ -849,7 +870,7 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
     ("max-block-size", "<'max-width'>"),
     ("max-height", "none | <box-size> | <anchor-size()>"),
     ("max-inline-size", "<'max-width'>"),
-    ("max-lines", "none | <integer>"),
+    ("max-lines", "none | <integer> | auto || <integer [1,∞]>"),
     ("max-width", "none | <box-size> | <anchor-size()>"),
     ("min-block-size", "<'min-width'>"),
     ("min-height", "auto | <box-size> | <anchor-size()>"),
@@ -895,11 +916,17 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
     ("overflow-x", "visible | hidden | clip | scroll | auto"),
     ("overflow-y", "visible | hidden | clip | scroll | auto"),
     ("overlay", "none | auto"),
-    ("overscroll-behavior", "[ contain | none | auto ]{1,2}"),
-    ("overscroll-behavior-block", "contain | none | auto"),
-    ("overscroll-behavior-inline", "contain | none | auto"),
-    ("overscroll-behavior-x", "contain | none | auto"),
-    ("overscroll-behavior-y", "contain | none | auto"),
+    (
+        "overscroll-behavior",
+        "[ contain | none | auto ]{1,2} | [ contain | none | auto | chain ]{1,2}",
+    ),
+    ("overscroll-behavior-block", "contain | none | auto | chain"),
+    (
+        "overscroll-behavior-inline",
+        "contain | none | auto | chain",
+    ),
+    ("overscroll-behavior-x", "contain | none | auto | chain"),
+    ("overscroll-behavior-y", "contain | none | auto | chain"),
     ("padding", "<'padding-top'>{1,4}"),
     ("padding-block", "<'padding-top'>{1,2}"),
     ("padding-block-end", "<'padding-top'>"),
@@ -930,7 +957,7 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
     ("place-self", "<'align-self'> <'justify-self'>?"),
     (
         "pointer-events",
-        "auto | none | visiblePainted | visibleFill | visibleStroke | visible | painted | fill | stroke | all | inherit",
+        "auto | none | visiblePainted | visibleFill | visibleStroke | visible | painted | fill | stroke | all | inherit | bounding-box",
     ),
     ("position", "static | relative | absolute | sticky | fixed"),
     (
@@ -949,7 +976,7 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
     ("position-try-order", "normal | <try-size>"),
     (
         "position-visibility",
-        "always | [ anchors-valid || anchors-visible || no-overflow ]",
+        "always | [ anchors-valid || anchors-visible || no-overflow ] | [ anchor-valid || anchor-visible || no-overflow ]",
     ),
     ("print-color-adjust", "economy | exact"),
     ("quotes", "none | auto | [ <string> <string> ]+"),
@@ -971,13 +998,13 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
         "rotate",
         "none | <angle> | [ x | y | z | <number>{3} ] && <angle>",
     ),
-    ("row-gap", "normal | <length-percentage>"),
+    ("row-gap", "normal | <length-percentage> | <line-width>"),
     (
         "ruby-align",
         "start | center | space-between | space-around",
     ),
-    ("ruby-merge", "separate | collapse | auto"),
-    ("ruby-overhang", "auto | none"),
+    ("ruby-merge", "separate | collapse | auto | merge"),
+    ("ruby-overhang", "auto | none | spaces"),
     (
         "ruby-position",
         "[ alternate || [ over | under ] ] | inter-character",
@@ -1068,20 +1095,20 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
     ("stroke-linecap", "butt | round | square"),
     (
         "stroke-linejoin",
-        "miter | miter-clip | round | bevel | arcs",
+        "miter | miter-clip | round | bevel | arcs | [ crop | arcs | miter ] || [ bevel | round | fallback ]",
     ),
     ("stroke-miterlimit", "<number>"),
     ("stroke-opacity", "<'opacity'>"),
     ("stroke-width", "<length-percentage> | <number>"),
-    ("tab-size", "<integer> | <length>"),
+    ("tab-size", "<integer> | <length> | <number [0,∞]>"),
     ("table-layout", "auto | fixed"),
     (
         "text-align",
-        "start | end | left | right | center | justify | match-parent | justify-all",
+        "start | end | left | right | center | justify | match-parent | justify-all | <text-align-char> [ start | end | left | right | center ]? | [ start | end | left | right | center ] <text-align-char>",
     ),
     (
         "text-align-last",
-        "auto | start | end | left | right | center | justify",
+        "auto | start | end | left | right | center | justify | match-parent",
     ),
     ("text-anchor", "start | middle | end"),
     ("text-autospace", "normal | <autospace> | auto"),
@@ -1104,7 +1131,7 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
     ),
     (
         "text-decoration-skip",
-        "none | [ objects || [ spaces | [ leading-spaces || trailing-spaces ] ] || edges || box-decoration ]",
+        "none | [ objects || [ spaces | [ leading-spaces || trailing-spaces ] ] || edges || box-decoration ] | auto",
     ),
     ("text-decoration-skip-ink", "auto | all | none"),
     (
@@ -1113,7 +1140,7 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
     ),
     (
         "text-decoration-thickness",
-        "auto | from-font | <length> | <percentage>",
+        "auto | from-font | <length> | <percentage> | <line-width>",
     ),
     (
         "text-emphasis",
@@ -1138,7 +1165,7 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
     ),
     (
         "text-justify",
-        "auto | none | inter-word | inter-character | distribute",
+        "[ auto | none | inter-word | inter-character | ruby ] || no-compress | distribute",
     ),
     ("text-orientation", "mixed | upright | sideways"),
     ("text-overflow", "[ clip | ellipsis | <string> ]{1,2}"),
@@ -1150,7 +1177,7 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
     ("text-size-adjust", "none | auto | <percentage>"),
     (
         "text-spacing-trim",
-        "space-all | normal | space-first | trim-start",
+        "space-all | normal | space-first | trim-start | trim-both | trim-all | auto",
     ),
     (
         "text-transform",
@@ -1163,8 +1190,11 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
     ),
     ("text-wrap", "<'text-wrap-mode'> || <'text-wrap-style'>"),
     ("text-wrap-mode", "wrap | nowrap"),
-    ("text-wrap-style", "auto | balance | stable | pretty"),
-    ("timeline-scope", "none | <dashed-ident>#"),
+    (
+        "text-wrap-style",
+        "auto | balance | stable | pretty | avoid-short-last-line",
+    ),
+    ("timeline-scope", "none | <dashed-ident># | all"),
     (
         "timeline-trigger",
         "none | [ <'timeline-trigger-name'> <'timeline-trigger-source'> <'timeline-trigger-activation-range'> [ '/' <'timeline-trigger-active-range'> ]? ]#",
@@ -1231,14 +1261,14 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
         "unicode-bidi",
         "normal | embed | isolate | bidi-override | isolate-override | plaintext",
     ),
-    ("user-select", "auto | text | none | all"),
+    ("user-select", "auto | text | none | all | contain"),
     (
         "vector-effect",
         "none | non-scaling-stroke | non-scaling-size | non-rotation | fixed-position",
     ),
     (
         "vertical-align",
-        "baseline | sub | super | text-top | text-bottom | middle | top | bottom | <percentage> | <length>",
+        "baseline | sub | super | text-top | text-bottom | middle | top | bottom | <percentage> | <length> | [ first | last ] || <'alignment-baseline'> || <'baseline-shift'>",
     ),
     (
         "view-timeline",
@@ -1256,14 +1286,14 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
         "none | <custom-ident> | match-element",
     ),
     ("view-transition-scope", "none | all"),
-    ("visibility", "visible | hidden | collapse"),
+    ("visibility", "visible | hidden | collapse | force-hidden"),
     (
         "white-space",
         "normal | pre | pre-wrap | pre-line | <'white-space-collapse'> || <'text-wrap-mode'>",
     ),
     (
         "white-space-collapse",
-        "collapse | preserve | preserve-breaks | preserve-spaces | break-spaces",
+        "collapse | preserve | preserve-breaks | preserve-spaces | break-spaces | discard",
     ),
     ("widows", "<integer>"),
     ("width", "auto | <box-size> | <anchor-size()>"),
@@ -1271,10 +1301,10 @@ pub(crate) const PROPERTY_SYNTAXES: &[(&str, &str)] = &[
     ("window-drag", "none | move"),
     (
         "word-break",
-        "normal | break-all | keep-all | break-word | auto-phrase",
+        "normal | break-all | keep-all | break-word | auto-phrase | manual",
     ),
-    ("word-spacing", "normal | <length>"),
-    ("word-wrap", "normal | break-word"),
+    ("word-spacing", "normal | <length> | <length-percentage>"),
+    ("word-wrap", "normal | break-word | anywhere"),
     (
         "writing-mode",
         "horizontal-tb | vertical-rl | vertical-lr | sideways-rl | sideways-lr",
@@ -1585,7 +1615,7 @@ pub(crate) const TYPE_SYNTAXES: &[(&str, &str)] = &[
     ("display-box", "contents | none"),
     (
         "display-inside",
-        "flow | flow-root | table | flex | grid | ruby | math",
+        "flow | flow-root | table | flex | grid | ruby | math | grid-lanes",
     ),
     (
         "display-internal",
@@ -1593,7 +1623,7 @@ pub(crate) const TYPE_SYNTAXES: &[(&str, &str)] = &[
     ),
     (
         "display-legacy",
-        "inline-block | inline-list-item | inline-table | inline-flex | inline-grid",
+        "inline-block | inline-list-item | inline-table | inline-flex | inline-grid | inline-grid-lanes",
     ),
     (
         "display-listitem",
@@ -1628,7 +1658,10 @@ pub(crate) const TYPE_SYNTAXES: &[(&str, &str)] = &[
         "explicit-track-list",
         "[ <line-names>? <track-size> ]+ <line-names>?",
     ),
-    ("family-name", "<string> | <custom-ident>+"),
+    (
+        "family-name",
+        "<string> | <family-name-whole> | <family-name-start> <ident>+",
+    ),
     ("feature-tag-value", "<string> [ <integer> | on | off ]?"),
     (
         "feature-type",
@@ -1805,7 +1838,7 @@ pub(crate) const TYPE_SYNTAXES: &[(&str, &str)] = &[
         "line-style",
         "none | hidden | dotted | dashed | solid | double | groove | ridge | inset | outset",
     ),
-    ("line-width", "<length> | thin | medium | thick"),
+    ("line-width", "<length> | hairline | thin | medium | thick"),
     ("linear()", "linear( [ <number> && <percentage>{0,2} ]# )"),
     ("linear-color-hint", "<length-percentage>"),
     ("linear-color-stop", "<color> <color-stop-length>?"),
@@ -1936,7 +1969,7 @@ pub(crate) const TYPE_SYNTAXES: &[(&str, &str)] = &[
     ),
     (
         "paint",
-        "none | <color> | <url> [none | <color>]? | context-fill | context-stroke",
+        "none | <color> | <url> [none | <color>]? | context-fill | context-stroke | <image> | child | child( <integer> )",
     ),
     ("paint()", "paint( <ident>, <declaration-value>? )"),
     ("paint-box", "<visual-box> | fill-box | stroke-box"),
@@ -2133,6 +2166,14 @@ pub(crate) const TYPE_SYNTAXES: &[(&str, &str)] = &[
     ),
     ("skewX()", "skewX( [ <angle> | <zero> ] )"),
     ("skewY()", "skewY( [ <angle> | <zero> ] )"),
+    (
+        "snap-block()",
+        "snap-block( <length> , [ start | end | near ]? )",
+    ),
+    (
+        "snap-inline()",
+        "snap-inline( <length> , [ left | right | near ]? )",
+    ),
     ("sqrt()", "sqrt( <calc-sum> )"),
     ("step-easing-function", "step-start | step-end | <steps()>"),
     (
@@ -2275,6 +2316,26 @@ pub(crate) const TYPE_SYNTAXES: &[(&str, &str)] = &[
 ];
 
 pub(crate) const UNKNOWN_KEYWORDS: &[(&str, &[&str])] = &[
+    (
+        "column-width",
+        &[
+            "stretch",
+            "contain",
+            "min-content",
+            "max-content",
+            "fit-content",
+        ],
+    ),
+    (
+        "columns",
+        &[
+            "stretch",
+            "contain",
+            "min-content",
+            "max-content",
+            "fit-content",
+        ],
+    ),
     ("display", &["oeb-page-head", "oeb-page-foot"]),
     ("outline", &["invert"]),
     ("outline-color", &["invert"]),
