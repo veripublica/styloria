@@ -661,8 +661,10 @@ mod tests {
         assert_eq!(kinds("@font-face { } @namespace \"u\";"), [m("namespace")]);
         assert_eq!(kinds("@media print { @import \"a.css\"; }"), [m("import")]);
         assert_eq!(kinds("p { @namespace \"u\"; }"), [m("namespace")]);
-        // A rule a browser drops does not count.
+        // A rule a browser drops does not count, nor does one whose prefix
+        // is not declared yet.
         assert_eq!(kinds(". bad { } @import \"a.css\";"), []);
+        assert_eq!(kinds("svg|a { } @namespace svg \"u\";"), []);
         assert_eq!(
             kinds("@unknown; @import \"a.css\";"),
             [(DiagnosticKind::UnknownAtRule, "unknown".into())]

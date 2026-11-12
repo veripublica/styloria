@@ -23,6 +23,8 @@
 //!   allow — an id that is not an identifier (`#1a`), a type selector after
 //!   another simple selector (`[x]p`), anything but a pseudo-class or
 //!   pseudo-element after a pseudo-element (`p::before.x`), a pseudo-element
+//!   after a pseudo-element that does not define it as its sub-pseudo-element
+//!   (`p::before::before`; `p::before::marker` is fine), a pseudo-element
 //!   before the last compound (`p::before span`), an `An+B` that does not
 //!   parse (`:nth-child(foo)`), an empty `:has()`. Browsers drop such a
 //!   rule just the same; epubcheck accepts it.
@@ -1032,6 +1034,7 @@ fn compound<'a>(
 ) -> Result<(Spanned<CompoundSelector<'a>>, usize), SyntaxError> {
     let mut simples: Vec<Spanned<SimpleSelector<'a>>> = Vec::new();
     let mut after_pseudo_element = false;
+    let mut last_pseudo_element: Option<Cow<'a, str>> = None;
     let mut i = start;
     while let Some(cv) = part.get(i) {
         if is_whitespace(&cv.node) || combinator(&cv.node).is_some() {
@@ -1044,9 +1047,13 @@ fn compound<'a>(
                 .iter()
                 .all(|p| matches!(p.node, SimpleSelector::Nesting)),
             SimpleSelector::PseudoClass(_) => true,
-            SimpleSelector::PseudoElement(_) => {
+            SimpleSelector::PseudoElement(pe) => {
                 after_pseudo_element = true;
-                true
+                let ok = last_pseudo_element
+                    .as_deref()
+                    .is_none_or(|prev| may_follow(prev, &pe.name));
+                last_pseudo_element = Some(pe.name.clone());
+                ok
             }
             _ => !after_pseudo_element,
         };
@@ -1058,6 +1065,28 @@ fn compound<'a>(
     }
     let span = part[start].span.to(part[i - 1].span);
     Ok((Spanned::new(CompoundSelector { simples }, span), i - start))
+}
+
+/// Whether the pseudo-element `next` may come right after `prev`, as a
+/// sub-pseudo-element. Only the specifications' own pairs are: `::marker` of
+/// `::before` and `::after` (CSS Pseudo-Elements 4), any pseudo-element but
+/// another `::part()` after a `::part()` (CSS Shadow Parts 1), a
+/// tree-abiding pseudo-element after `::slotted()` (CSS Scoping 1), and
+/// `::column::scroll-marker` (CSS Overflow 5). A vendor-prefixed name on
+/// either side is left alone, as everywhere in this crate.
+fn may_follow(prev: &str, next: &str) -> bool {
+    let prev = prev.to_ascii_lowercase();
+    let next = next.to_ascii_lowercase();
+    let tree_abiding = matches!(next.as_str(), "before" | "after" | "marker");
+    prev.starts_with('-')
+        || next.starts_with('-')
+        || match prev.as_str() {
+            "before" | "after" => next == "marker",
+            "part" => next != "part",
+            "slotted" => tree_abiding,
+            "column" => next == "scroll-marker",
+            _ => false,
+        }
 }
 
 /// One simple selector at `i`, and how many component values it took.
@@ -1944,6 +1973,13 @@ mod tests {
             "a[class~=\"c\"] { color: red }",
             "a[href=\"x\" i] { color: red }",
             "a[href=\"x\" s] { color: red }",
+            // The sub-pseudo-elements the specifications define.
+            "p::before::marker { color: red }",
+            "p:after::marker { color: red }",
+            "x-a::part(label)::before { color: red }",
+            "::slotted(*)::marker { color: red }",
+            "div::column::scroll-marker { color: red }",
+            "p::-webkit-x::before { color: red }",
             "a[href=\"x\" q] { color: red }",
             "a[ href = \"x\" ] { color: red }",
             // Namespaces.
@@ -2034,6 +2070,13 @@ mod tests {
             ("[x]p", S),
             ("p::before.x", S),
             ("p::before span", S),
+            // A pseudo-element after one that does not define it.
+            ("p::before::before", S),
+            ("p::after::after", S),
+            ("p::marker::before", S),
+            ("p::first-line::first-letter", S),
+            ("x-a::part(a)::part(b)", S),
+            ("::slotted(*)::first-line", S),
             // Arguments that are all valid pieces, wrongly put together.
             ("p:not(#1a)", S),
             ("a:has()", S),

@@ -60,8 +60,26 @@ fn valid_values() {
             "page-break-before: always",
             "width: inherit",
             "width: REVERT-LAYER",
-            "--anything: { whatever ] }",
+            "--anything: { whatever [ ] }",
+            "--anything:",
+            "--x: a !important",
             "WIDTH: 1PX",
+        ],
+    );
+}
+
+/// A custom property's value is `<declaration-value>?` (CSS Syntax 3 §7.2):
+/// a `)`, `]` or `}` that closes nothing, or a top-level `!`, does not fit.
+#[test]
+fn custom_property_values_outside_declaration_value() {
+    all(
+        ValueCheck::Invalid,
+        &[
+            "--anything: { whatever ] }",
+            "--x: a)",
+            "--x: a]",
+            "--x: f(a ])",
+            "--x: a ! b",
         ],
     );
 }

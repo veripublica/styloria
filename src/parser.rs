@@ -174,7 +174,11 @@ pub struct Stylesheet<'a> {
 /// discarded and *where*, which a validating tool (e.g. an EPUB checker
 /// mapping them to a "CSS parse error" message) otherwise cannot see.
 ///
-/// Each defect is reported once. Errors come back sorted by `span.start`.
+/// An error is reported where CSS Syntax names a parse error, and nowhere
+/// else; [`NestingTooDeep`](SyntaxErrorKind::NestingTooDeep) is the
+/// exception, a limit of this parser's own. Each parse error is reported once,
+/// so one defect may give two: a stray `}` and the invalid rule it ends up in.
+/// Errors come back sorted by `span.start`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SyntaxError {
     /// The source span of the malformed construct.
@@ -186,9 +190,9 @@ pub struct SyntaxError {
 ///
 /// | kind | top level | inside a block |
 /// |---|---|---|
-/// | [`BadString`](Self::BadString), [`BadUrl`](Self::BadUrl), [`InvalidUnicodeRange`](Self::InvalidUnicodeRange), [`UnterminatedBlock`](Self::UnterminatedBlock), [`NestingTooDeep`](Self::NestingTooDeep) | yes | yes |
-/// | [`InvalidSelector`](Self::InvalidSelector), [`InvalidSelectorStructure`](Self::InvalidSelectorStructure), [`UnknownPseudo`](Self::UnknownPseudo), [`NarrowedIdent`](Self::NarrowedIdent) | yes | yes |
-/// | [`UnterminatedRule`](Self::UnterminatedRule), [`DroppedCustomPropertyRule`](Self::DroppedCustomPropertyRule) | yes | never |
+/// | [`BadString`](Self::BadString), [`BadUrl`](Self::BadUrl), [`UnterminatedComment`](Self::UnterminatedComment), [`UnterminatedString`](Self::UnterminatedString), [`UnterminatedUrl`](Self::UnterminatedUrl), [`UnterminatedEscape`](Self::UnterminatedEscape), [`InvalidEscape`](Self::InvalidEscape), [`InvalidUnicodeRange`](Self::InvalidUnicodeRange), [`NestingTooDeep`](Self::NestingTooDeep) | yes | yes |
+/// | [`InvalidSelector`](Self::InvalidSelector), [`InvalidSelectorStructure`](Self::InvalidSelectorStructure), [`UnknownPseudo`](Self::UnknownPseudo), [`NarrowedIdent`](Self::NarrowedIdent), [`UndeclaredNamespacePrefix`](Self::UndeclaredNamespacePrefix) | yes | yes |
+/// | [`UnterminatedRule`](Self::UnterminatedRule), [`StrayCloseBrace`](Self::StrayCloseBrace) | yes | never |
 /// | [`MalformedDeclaration`](Self::MalformedDeclaration), [`UnexpectedToken`](Self::UnexpectedToken) | never | yes |
 ///
 /// [`parse_block_contents`] reads its whole input as one block, so it reports
@@ -206,11 +210,38 @@ pub enum SyntaxErrorKind {
     /// A top-level qualified rule whose prelude reached the end of input
     /// before its `{ … }` block (§5.5.3). Dropped. The span is the prelude's
     /// first token.
+    ///
+    /// A *block* that reaches the end of input is not an error: §5.5 closes
+    /// a rule's block, a simple block and a function there without naming a
+    /// parse error, so `p { color: red` is a complete rule. Its span runs to
+    /// the end of input.
     UnterminatedRule,
-    /// A `{`, `[`, or `(` that reached the end of input before its closing
-    /// bracket. The span is the opening bracket; the node it opened (a
-    /// rule's block, a simple block) still comes back, running to the end.
-    UnterminatedBlock,
+    /// A `}` in the prelude of a top-level qualified rule (§5.5.3), which
+    /// becomes part of that prelude: `} p { … }`. The span is the `}`. The
+    /// rule it ends up in is then not a valid style rule, and reports that
+    /// too ([`InvalidSelector`](Self::InvalidSelector), or
+    /// [`UnterminatedRule`](Self::UnterminatedRule) when no block follows).
+    StrayCloseBrace,
+    /// A comment that reaches the end of input before its `*/` (§4.3.2). It
+    /// produces no token. The span runs from the `/*` to the end of input.
+    UnterminatedComment,
+    /// A string that reaches the end of input before its closing quote
+    /// (§4.3.5). The string token still comes back, holding what was read.
+    /// The span is the string token.
+    UnterminatedString,
+    /// An unquoted `url(` that reaches the end of input before its `)`
+    /// (§4.3.6). The url token still comes back. The span is the token.
+    UnterminatedUrl,
+    /// A `\` that is the last code point of the input, outside a string
+    /// (§4.3.7): it escapes nothing, and stands for U+FFFD. The span is the
+    /// `\`. Inside a string the string's own
+    /// [`UnterminatedString`](Self::UnterminatedString) is reported instead,
+    /// as §4.3.5 never reads that `\` as an escape.
+    UnterminatedEscape,
+    /// A `\` followed by a newline, outside a string (§4.3.1): not an
+    /// escape, so it becomes a delim. The span is the `\`. Inside an
+    /// unquoted url it makes a [`BadUrl`](Self::BadUrl) instead.
+    InvalidEscape,
     /// Like [`MalformedDeclaration`](Self::MalformedDeclaration), for an
     /// item that starts with something other than an ident (`1px: red;`).
     /// Not reported when that first token is a bad string or bad url, which
@@ -273,11 +304,13 @@ pub enum SyntaxErrorKind {
     /// rather than raising a catchable error. Real stylesheets nest 2 deep;
     /// anything reaching 256 is machine-generated or hostile.
     NestingTooDeep,
-    /// A top-level rule whose prelude starts like a custom property,
-    /// `--foo:hover { … }`. §5.5.3 drops it without naming a parse error;
-    /// it is reported so the dropped content leaves a trace. The span covers
-    /// the whole construct, prelude and block.
-    DroppedCustomPropertyRule,
+    /// A style rule's selector that uses a namespace prefix no `@namespace`
+    /// rule before it declares (CSS Namespaces 3, "CSS Qualified Names"):
+    /// `svg|rect`, `[xlink|href]`. Such a selector is invalid, so the rule is
+    /// dropped, and a misplaced `@namespace` declares nothing. Inside `:is()`
+    /// and `:where()` only that argument is dropped, without an error. The
+    /// span is the simple selector that uses the prefix.
+    UndeclaredNamespacePrefix,
 }
 
 /// The deepest block/function nesting the parser will descend into.
@@ -308,7 +341,80 @@ pub const MAX_NESTING_DEPTH: usize = 256;
 pub fn parse_stylesheet(css: &str) -> (Stylesheet<'_>, Vec<SyntaxError>) {
     let mut p = Parser::new(css);
     let rules = p.stylesheet_contents();
-    (Stylesheet { rules }, p.finish())
+    let sheet = Stylesheet { rules };
+    // Namespace prefixes are only known once the `@namespace` rules are.
+    if css.as_bytes().contains(&b'|') {
+        undeclared_prefix_errors(&sheet, &mut p.errors);
+    }
+    (sheet, p.finish())
+}
+
+/// Report every style rule whose selector parses but uses a namespace prefix
+/// that is not declared ([`SyntaxErrorKind::UndeclaredNamespacePrefix`]): at
+/// the top level, by the `@namespace` rules before it; in a block, by all of
+/// them, which by then are all known.
+fn undeclared_prefix_errors(sheet: &Stylesheet<'_>, errors: &mut Vec<SyntaxError>) {
+    use crate::at_rule::{has_bar, layout};
+    use crate::matching::Namespaces;
+    let namespaces = Namespaces::from_stylesheet(sheet);
+    let mut report = |span| {
+        errors.push(SyntaxError {
+            span,
+            kind: SyntaxErrorKind::UndeclaredNamespacePrefix,
+        })
+    };
+    fn walk(
+        items: &[BlockItem<'_>],
+        ctx: Context,
+        ns: &Namespaces<'_>,
+        report: &mut dyn FnMut(Span),
+    ) {
+        for item in items {
+            let BlockItem::Rule(r) = item else { continue };
+            match &r.node {
+                Rule::Qualified(q) => {
+                    if ctx != Context::Opaque && has_bar(&q.prelude) {
+                        let list = match ctx {
+                            Context::Nested => {
+                                crate::selector::parse_relative_selector_list(&q.prelude)
+                            }
+                            _ => crate::selector::parse_selector_list(&q.prelude),
+                        };
+                        if let Some(span) = list.ok().and_then(|l| l.undeclared_prefix(ns)) {
+                            report(span);
+                        }
+                    }
+                    let inner = match ctx {
+                        Context::Opaque => Context::Opaque,
+                        _ => Context::Nested,
+                    };
+                    walk(&q.block.node, inner, ns, report);
+                }
+                Rule::At(a) => {
+                    if let Some(b) = &a.block {
+                        walk(&b.node, context_for_at_rule(&a.name, ctx), ns, report);
+                    }
+                }
+            }
+        }
+    }
+    let (_, top) = layout(sheet);
+    for (rule, missing) in sheet.rules.iter().zip(top) {
+        match &rule.node {
+            Rule::Qualified(q) => {
+                if let Some(span) = missing {
+                    report(span);
+                }
+                walk(&q.block.node, Context::Nested, &namespaces, &mut report);
+            }
+            Rule::At(a) => {
+                if let Some(b) = &a.block {
+                    let ctx = context_for_at_rule(&a.name, Context::Style);
+                    walk(&b.node, ctx, &namespaces, &mut report);
+                }
+            }
+        }
+    }
 }
 
 /// The [`SyntaxError`]s in a stylesheet, in source order — a convenience over
@@ -520,6 +626,7 @@ impl<'a> Parser<'a> {
         for (o, _) in open {
             close[o] = len;
         }
+        errors.extend(tokenizer.take_errors());
         if !report {
             errors.clear();
         }
@@ -618,7 +725,12 @@ impl<'a> Parser<'a> {
     /// §5.5.3 "Consume a qualified rule", with `nested` false.
     fn top_level_qualified_rule(&mut self) -> Option<Spanned<Rule<'a>>> {
         let start = self.pos;
-        let brace = match self.scan(start, false) {
+        let stop = self.scan(start, false);
+        let prelude_end = match stop {
+            Stop::Curly(b) | Stop::End(b) => b,
+        };
+        self.report_stray_close_braces(start, prelude_end);
+        let brace = match stop {
             Stop::Curly(b) => b,
             Stop::End(end) => {
                 // The prelude ran to the end of input with no block.
@@ -629,17 +741,30 @@ impl<'a> Parser<'a> {
         };
         if self.looks_like_custom_property(start, brace) {
             // `--foo:hover { … }`: §5.5.3 consumes the block and returns
-            // nothing.
-            let end = self.after_close(brace);
-            let last = self.toks[end - 1].span;
-            self.error(
-                self.toks[start].span.to(last),
-                SyntaxErrorKind::DroppedCustomPropertyRule,
-            );
-            self.pos = end;
+            // nothing, without a parse error.
+            self.pos = self.after_close(brace);
             return None;
         }
         Some(self.qualified_rule(start, brace, Context::Style, false))
+    }
+
+    /// §5.5.3: each `}` at the level of a top-level qualified rule's prelude,
+    /// `start..end`, is a parse error. One inside a bracket is a token of
+    /// that simple block, which is not.
+    fn report_stray_close_braces(&mut self, start: usize, end: usize) {
+        let mut i = start;
+        while i < end {
+            match self.tok(i) {
+                Some(Token::RightCurly) => {
+                    self.error(self.toks[i].span, SyntaxErrorKind::StrayCloseBrace);
+                    i += 1;
+                }
+                Some(Token::LeftSquare | Token::LeftParen | Token::Function(_)) => {
+                    i = self.after_close(i)
+                }
+                _ => i += 1,
+            }
+        }
     }
 
     /// Whether a prelude's first two non-whitespace tokens are a `--name`
@@ -765,8 +890,9 @@ impl<'a> Parser<'a> {
             self.pos = close + 1;
             self.toks[close].span
         } else {
+            // §5.5.4: the end of input closes the block, without a parse
+            // error.
             self.pos = self.toks.len();
-            self.error(open_span, SyntaxErrorKind::UnterminatedBlock);
             self.last_span()
         };
         if nested {
@@ -1024,11 +1150,8 @@ impl<'a> Parser<'a> {
             self.pos = close + 1;
             self.toks[close].span
         } else {
-            // Only an unclosed bracket is reported; an unclosed function is
-            // not: the end of input closes it silently.
-            if kind.is_some() {
-                self.error(open_span, SyntaxErrorKind::UnterminatedBlock);
-            }
+            // §5.5.9, §5.5.10: the end of input closes a simple block or a
+            // function, without a parse error.
             values.last().map_or(open_span, |v| v.span)
         };
         let node = match (kind, name) {
@@ -1291,13 +1414,12 @@ mod tests {
         assert_eq!(
             errs.iter().map(|e| e.kind).collect::<Vec<_>>(),
             [
-                SyntaxErrorKind::UnterminatedBlock,
                 SyntaxErrorKind::InvalidSelector,
                 SyntaxErrorKind::InvalidSelector
             ]
         );
-        // The block error sits at the `{`, and the rule runs to the end.
-        assert_eq!(errs[0].span.slice(css), "{");
+        // The end of input closes the block without an error, and the rule
+        // runs to the end.
         let (sheet, _) = parse_stylesheet(css);
         assert_eq!(sheet.rules[0].span.end, css.len());
     }
@@ -1410,14 +1532,14 @@ mod tests {
     }
 
     #[test]
-    fn a_top_level_custom_property_lookalike_is_dropped_and_reported() {
+    fn a_top_level_custom_property_lookalike_is_dropped_silently() {
+        // §5.5.3 consumes the block and returns nothing, naming no parse
+        // error.
         let css = "--foo:hover { color: blue } p { color: red }";
         let (sheet, errs) = parse_stylesheet(css);
         assert_eq!(sheet.rules.len(), 1);
         assert_eq!(sheet.rules[0].span.slice(css), "p { color: red }");
-        assert_eq!(errs.len(), 1);
-        assert_eq!(errs[0].kind, SyntaxErrorKind::DroppedCustomPropertyRule);
-        assert_eq!(errs[0].span.slice(css), "--foo:hover { color: blue }");
+        assert!(errs.is_empty(), "{errs:?}");
     }
 
     #[test]
@@ -1471,15 +1593,97 @@ mod tests {
     }
 
     #[test]
-    fn unterminated_block_is_reported_at_the_brace() {
+    fn blocks_closed_by_the_end_of_input_are_not_errors() {
+        // §5.5.4, §5.5.9 and §5.5.10 name no parse error there.
+        for css in [
+            "a { color: red",
+            "a { color: rgb(1, 2",
+            "a { color: [x",
+            "@media print { p { color: red }",
+        ] {
+            assert!(kinds(css).is_empty(), "{css}: {:?}", kinds(css));
+        }
         let css = "a { color: red";
-        let errs = syntax_errors(css);
-        assert_eq!(errs.len(), 1);
-        assert_eq!(errs[0].kind, SyntaxErrorKind::UnterminatedBlock);
-        assert_eq!(errs[0].span.slice(css), "{");
         let (sheet, _) = parse_stylesheet(css);
         assert_eq!(shape(css), ["d:color"]);
         assert_eq!(sheet.rules[0].span.slice(css), css);
+    }
+
+    /// Each of §4.3's parse errors that no token carries, with its span.
+    #[test]
+    fn tokenizer_parse_errors_are_reported() {
+        use SyntaxErrorKind::*;
+        for (css, want, at) in [
+            ("p { }\n/* open", UnterminatedComment, "/* open"),
+            ("/* a */ /* b", UnterminatedComment, "/* b"),
+            ("p { content: \"a", UnterminatedString, "\"a"),
+            ("p { content: 'a\\", UnterminatedString, "'a\\"),
+            ("p { background: url(a", UnterminatedUrl, "url(a"),
+            ("p { background: url(a  ", UnterminatedUrl, "url(a  "),
+            ("p { background: url(a\\", UnterminatedUrl, "url(a\\"),
+            ("@x a\\", UnterminatedEscape, "\\"),
+            ("p { a: b\\\n }", InvalidEscape, "\\"),
+        ] {
+            let errs = syntax_errors(css);
+            assert!(
+                errs.iter()
+                    .any(|e| e.kind == want && e.span.slice(css) == at),
+                "{css:?}: {errs:?}"
+            );
+        }
+        // An escape at the end of a url is both: §4.3.7, then §4.3.6.
+        assert_eq!(
+            kinds("p { background: url(a\\"),
+            [UnterminatedUrl, UnterminatedEscape]
+        );
+        // A comment closed in time, a string closed by its quote: nothing.
+        assert!(kinds("/* a */ p { content: 'a\\'' }").is_empty());
+    }
+
+    #[test]
+    fn an_undeclared_namespace_prefix_is_reported() {
+        use SyntaxErrorKind::UndeclaredNamespacePrefix as U;
+        let ns = "@namespace svg \"http://www.w3.org/2000/svg\";";
+        for (css, want) in [
+            ("svg|rect { }", vec![U]),
+            ("[xlink|href] { }", vec![U]),
+            ("p:not(svg|rect) { }", vec![U]),
+            ("p { svg|rect { } }", vec![U]),
+            ("@media print { svg|rect { } }", vec![U]),
+            ("NS svg|rect, *|a, |b, [*|x] { }", vec![]),
+            ("NS p { svg|rect { } }", vec![]),
+            // A forgiving list drops the argument without an error.
+            (":is(svg|rect, p) { }", vec![]),
+            // `|=` is not a prefix.
+            ("[lang|=en] { }", vec![]),
+            // Declared only for the rules after it; a misplaced one
+            // declares nothing.
+            ("svg|rect { } NS svg|rect { }", vec![U]),
+            ("p { } NS svg|rect { }", vec![U]),
+            // A keyframe selector is not a selector.
+            ("@keyframes k { a|b { } }", vec![]),
+        ] {
+            let css = css.replace("NS", ns);
+            assert_eq!(kinds(&css), want, "{css}");
+        }
+        let css = "p, svg|rect { }";
+        assert_eq!(syntax_errors(css)[0].span.slice(css), "svg|rect");
+    }
+
+    #[test]
+    fn a_stray_close_brace_at_the_top_level_is_its_own_error() {
+        use SyntaxErrorKind::*;
+        let css = "} p { margin: 0 }";
+        let errs = syntax_errors(css);
+        assert_eq!(
+            errs.iter().map(|e| e.kind).collect::<Vec<_>>(),
+            [StrayCloseBrace, InvalidSelector]
+        );
+        assert_eq!(errs[0].span.slice(css), "}");
+        // After the last rule: the `}` starts a rule that never gets a block.
+        assert_eq!(kinds("p { } }"), [StrayCloseBrace, UnterminatedRule]);
+        // Inside a bracket the `}` belongs to that simple block.
+        assert!(!kinds("[ } ] p { }").contains(&StrayCloseBrace));
     }
 
     #[test]
@@ -1508,12 +1712,9 @@ mod tests {
     fn a_trailing_fragment_in_a_block_is_a_malformed_item() {
         assert_eq!(
             kinds("@media print { p { color: red } i"),
-            [
-                SyntaxErrorKind::UnterminatedBlock,
-                SyntaxErrorKind::MalformedDeclaration
-            ]
+            [SyntaxErrorKind::MalformedDeclaration]
         );
-        assert!(kinds("@media print { p { color: red } ").len() == 1);
+        assert!(kinds("@media print { p { color: red } ").is_empty());
     }
 
     #[test]

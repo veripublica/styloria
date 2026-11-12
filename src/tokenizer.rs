@@ -19,10 +19,14 @@
 //! Tokenization never fails: every malformed construct has spec-defined
 //! recovery (`BadString`, `BadUrl`, or a `Delim` for a stray character), so
 //! `next_token` returns `Option<Token<'a>>` only to signal end-of-input,
-//! never an error.
+//! never an error. The parse errors §4.3 names that leave no trace in a
+//! token (a comment, string or url that reaches the end of input, an escape
+//! at the end of input, a `\` before a newline) are recorded on the side,
+//! for the parser to report.
 
 use std::borrow::Cow;
 
+use crate::parser::{SyntaxError, SyntaxErrorKind};
 use crate::span::{Span, Spanned};
 use crate::token::{NumericType, Token};
 
@@ -36,6 +40,9 @@ pub struct Tokenizer<'a> {
     /// §4.3.1's "unicode ranges allowed" flag. Only the parser sets it, to
     /// re-read a `unicode-range` declaration's value (§5.5.6).
     unicode_ranges: bool,
+    /// The parse errors met so far that no token carries; see the module
+    /// documentation. A bad string or bad url is its token, not one of these.
+    errors: Vec<SyntaxError>,
 }
 
 impl<'a> Tokenizer<'a> {
@@ -55,6 +62,7 @@ impl<'a> Tokenizer<'a> {
             pos,
             tok_start: pos,
             unicode_ranges: false,
+            errors: Vec::new(),
         }
     }
 
@@ -67,7 +75,21 @@ impl<'a> Tokenizer<'a> {
             pos: start,
             tok_start: start,
             unicode_ranges: true,
+            errors: Vec::new(),
         }
+    }
+
+    /// Move out the parse errors recorded so far, in source order.
+    pub(crate) fn take_errors(&mut self) -> Vec<SyntaxError> {
+        std::mem::take(&mut self.errors)
+    }
+
+    #[cold]
+    fn error(&mut self, start: usize, end: usize, kind: SyntaxErrorKind) {
+        self.errors.push(SyntaxError {
+            span: Span { start, end },
+            kind,
+        });
     }
 
     #[inline]
@@ -149,12 +171,18 @@ impl<'a> Tokenizer<'a> {
             && matches!(self.byte(i + 2), Some(b) if b == b'?' || b.is_ascii_hexdigit())
     }
 
+    /// §4.3.2 "Consume comments". One that reaches the end of input is a
+    /// parse error.
     fn consume_comments(&mut self) {
         while self.byte(self.pos) == Some(b'/') && self.byte(self.pos + 1) == Some(b'*') {
+            let start = self.pos;
             self.pos += 2;
             match self.input[self.pos..].find("*/") {
                 Some(rel) => self.pos += rel + 2,
-                None => self.pos = self.input.len(),
+                None => {
+                    self.pos = self.input.len();
+                    self.error(start, self.pos, SyntaxErrorKind::UnterminatedComment);
+                }
             }
         }
     }
@@ -201,7 +229,11 @@ impl<'a> Tokenizer<'a> {
                 self.pos += c.len_utf8();
                 if c == '\0' { '\u{FFFD}' } else { c }
             }
-            None => '\u{FFFD}',
+            None => {
+                // The `\` was the last code point: a parse error.
+                self.error(self.pos - 1, self.pos, SyntaxErrorKind::UnterminatedEscape);
+                '\u{FFFD}'
+            }
         }
     }
 
@@ -253,7 +285,14 @@ impl<'a> Tokenizer<'a> {
         let start = self.pos;
         loop {
             match self.byte(self.pos) {
-                None => return Token::String(Cow::Borrowed(&self.input[start..self.pos])),
+                None => {
+                    self.error(
+                        self.tok_start,
+                        self.pos,
+                        SyntaxErrorKind::UnterminatedString,
+                    );
+                    return Token::String(Cow::Borrowed(&self.input[start..self.pos]));
+                }
                 Some(b) if b == quote => {
                     let s = &self.input[start..self.pos];
                     self.pos += 1;
@@ -267,7 +306,14 @@ impl<'a> Tokenizer<'a> {
         let mut owned = self.input[start..self.pos].to_string();
         loop {
             match self.byte(self.pos) {
-                None => return Token::String(Cow::Owned(owned)),
+                None => {
+                    self.error(
+                        self.tok_start,
+                        self.pos,
+                        SyntaxErrorKind::UnterminatedString,
+                    );
+                    return Token::String(Cow::Owned(owned));
+                }
                 Some(b) if b == quote => {
                     self.pos += 1;
                     return Token::String(Cow::Owned(owned));
@@ -320,7 +366,10 @@ impl<'a> Tokenizer<'a> {
         let start = self.pos;
         loop {
             match self.byte(self.pos) {
-                None => return Token::Url(Cow::Borrowed(&self.input[start..self.pos])),
+                None => {
+                    self.error(self.tok_start, self.pos, SyntaxErrorKind::UnterminatedUrl);
+                    return Token::Url(Cow::Borrowed(&self.input[start..self.pos]));
+                }
                 Some(b')') => {
                     let s = &self.input[start..self.pos];
                     self.pos += 1;
@@ -345,7 +394,10 @@ impl<'a> Tokenizer<'a> {
         let mut owned = self.input[start..self.pos].to_string();
         loop {
             match self.byte(self.pos) {
-                None => return Token::Url(Cow::Owned(owned)),
+                None => {
+                    self.error(self.tok_start, self.pos, SyntaxErrorKind::UnterminatedUrl);
+                    return Token::Url(Cow::Owned(owned));
+                }
                 Some(b')') => {
                     self.pos += 1;
                     return Token::Url(Cow::Owned(owned));
@@ -378,7 +430,10 @@ impl<'a> Tokenizer<'a> {
     fn finish_url_after_whitespace(&mut self, value: Cow<'a, str>) -> Token<'a> {
         self.skip_whitespace();
         match self.byte(self.pos) {
-            None => Token::Url(value),
+            None => {
+                self.error(self.tok_start, self.pos, SyntaxErrorKind::UnterminatedUrl);
+                Token::Url(value)
+            }
             Some(b')') => {
                 self.pos += 1;
                 Token::Url(value)
@@ -588,7 +643,8 @@ impl<'a> Tokenizer<'a> {
                 if self.is_valid_escape_at(self.pos) {
                     self.consume_ident_like()
                 } else {
-                    // Parse error: a lone backslash (before EOF or a newline).
+                    // A `\` before a newline is not an escape: a parse error.
+                    self.error(self.pos, self.pos + 1, SyntaxErrorKind::InvalidEscape);
                     self.punct(Token::Delim('\\'))
                 }
             }

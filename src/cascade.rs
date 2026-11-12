@@ -119,7 +119,7 @@
 
 use crate::at_rule::{
     ImportLayer, ImportRule, LayerName, LayerRule, Placement, evaluate_import_supports,
-    evaluate_supports, parse_import_rule, parse_layer_rule, parse_media_query_list, placements,
+    evaluate_supports, layout, parse_import_rule, parse_layer_rule, parse_media_query_list,
 };
 use crate::matching::{Element, Match, Namespaces};
 use crate::parser::{self, AtRule, BlockItem, ComponentValue, Declaration, Rule, Stylesheet};
@@ -579,7 +579,7 @@ impl<'s, 'a> Cascade<'s, 'a> {
             for s in r.selectors.selectors.iter().chain(old) {
                 if let Some(name) = s.node.pseudo_element()
                     && !out.contains(&name)
-                    && s.node.matches_pseudo(element, ns, &name) != Match::No
+                    && s.node.matches_pseudo_declared(element, ns, &name) != Match::No
                 {
                     out.insert(name);
                 }
@@ -641,8 +641,8 @@ impl<'s, 'a> Cascade<'s, 'a> {
                 let mut specificity = Specificity::default();
                 for s in &list.selectors {
                     let m = match pseudo {
-                        Some(p) => s.node.matches_pseudo(element, ns, p),
-                        None => s.node.matches(element, ns),
+                        Some(p) => s.node.matches_pseudo_declared(element, ns, p),
+                        None => s.node.matches_declared(element, ns),
                     };
                     if m != Match::No {
                         best = best.or(m);
@@ -1186,8 +1186,14 @@ impl<'s, 'a> Builder<'_, 's, 'a> {
         });
         self.namespaces.push(Namespaces::from_stylesheet(sheet));
         self.importing.push(sheet);
-        // A misplaced `@import` or `@namespace` is ignored, as a browser does.
-        for (rule, place) in sheet.rules.iter().zip(placements(sheet)) {
+        // A misplaced `@import` or `@namespace` is ignored, as a browser does,
+        // and so is a style rule using a prefix no `@namespace` before it
+        // declares.
+        let (places, undeclared) = layout(sheet);
+        for ((rule, place), missing) in sheet.rules.iter().zip(places).zip(undeclared) {
+            if missing.is_some() {
+                continue;
+            }
             if let Rule::At(at) = &rule.node
                 && at.name.eq_ignore_ascii_case("import")
             {
@@ -1242,15 +1248,23 @@ impl<'s, 'a> Builder<'_, 's, 'a> {
                     parse_selector_list(&q.prelude)
                 };
                 // A rule whose selector does not parse is dropped, nested
-                // rules and all, as a browser does: its list stays empty.
-                let now = parsed.unwrap_or_default();
+                // rules and all, as a browser does: its list stays empty. So
+                // is one that uses an undeclared namespace prefix.
+                let ns = &self.namespaces[ctx.sheet];
+                let now = parsed
+                    .ok()
+                    .filter(|l| l.undeclared_prefix(ns).is_none())
+                    .unwrap_or_default();
                 // Before csswg-drafts#7129 it may read otherwise, through its
                 // own selector or its parent's.
                 let parent_now = ctx.parent.map(|(_, now, _)| now);
                 let parent_before = ctx.parent.and_then(|(_, _, before)| before);
                 let before = match selector_list_before_7129(&q.prelude, relative) {
                     BeforeNarrowing::Same => parent_before.map(|_| now.clone()),
-                    BeforeNarrowing::Parsed(list) => Some(list),
+                    BeforeNarrowing::Parsed(list) if list.undeclared_prefix(ns).is_none() => {
+                        Some(list)
+                    }
+                    BeforeNarrowing::Parsed(_) => Some(SelectorList::default()),
                     BeforeNarrowing::Dropped => Some(SelectorList::default()),
                 };
                 let resolve = |list: SelectorList<'a>, parent: Option<&SelectorList<'a>>| {
@@ -1819,6 +1833,34 @@ mod tests {
         // Rules in at-rules that style nothing are not candidates.
         let c = cascade(&["@font-face { width: 1px } @page { width: 1px }"]);
         assert_eq!(ask(&c, IMG, None, "width").0, Match::No);
+    }
+
+    #[test]
+    fn a_rule_with_an_undeclared_prefix_is_dropped() {
+        let x = "\"http://www.w3.org/1999/xhtml\"";
+        let c = cascade(&[&format!(
+            "@namespace h {x}; h|img {{ width: 1px }} q|img {{ height: 1px }} \
+             img:not(q|p) {{ color: red }} :is(q|img, img) {{ margin-top: 1px }}"
+        )]);
+        assert_eq!(ask(&c, IMG, None, "width").0, Match::Yes);
+        assert_eq!(ask(&c, IMG, None, "height").0, Match::No);
+        // `:not()` takes no invalid argument: the whole rule is dropped.
+        assert_eq!(ask(&c, IMG, None, "color").0, Match::No);
+        // `:is()` drops only that argument.
+        assert_eq!(ask(&c, IMG, None, "margin-top").0, Match::Yes);
+        // A prefix counts only after its `@namespace`; the rule before is
+        // dropped, and does not make the `@namespace` misplaced.
+        let c = cascade(&[&format!(
+            "h|img {{ width: 1px }} @namespace h {x}; h|img {{ height: 1px }}"
+        )]);
+        assert_eq!(ask(&c, IMG, None, "width").0, Match::No);
+        assert_eq!(ask(&c, IMG, None, "height").0, Match::Yes);
+        // Nested, the stylesheet's namespaces apply.
+        let c = cascade(&[&format!(
+            "@namespace h {x}; @media all {{ h|img {{ width: 1px }} q|img {{ height: 1px }} }}"
+        )]);
+        assert_eq!(ask(&c, IMG, None, "width").0, Match::Yes);
+        assert_eq!(ask(&c, IMG, None, "height").0, Match::No);
     }
 
     #[test]

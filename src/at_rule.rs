@@ -209,7 +209,8 @@ impl<'a> Namespaces<'a> {
     ///
     /// Only `@namespace` rules in their proper place count: after `@charset`,
     /// `@import` and `@layer` statements, before any other rule (CSS
-    /// Namespaces §2). A browser ignores one written later, and so does this.
+    /// Namespaces 3, "Declaring namespaces"). A browser ignores one written
+    /// later, and so does this.
     pub fn from_stylesheet(sheet: &Stylesheet<'a>) -> Namespaces<'a> {
         let mut ns = Namespaces::default();
         for (rule, place) in sheet.rules.iter().zip(placements(sheet)) {
@@ -316,8 +317,18 @@ pub(crate) enum Placement {
 /// every one but `@import` (CSS Namespaces, "Declaring namespaces").
 /// `@charset` and `@layer` statements may stand anywhere among them. A rule a browser drops
 /// does not count: an unknown at-rule, a style rule whose selector is
-/// invalid, an `@import` or `@namespace` whose prelude is.
+/// invalid (a namespace prefix not declared before it included), an
+/// `@import` or `@namespace` whose prelude is.
 pub(crate) fn placements(sheet: &Stylesheet<'_>) -> Vec<Placement> {
+    layout(sheet).0
+}
+
+/// [`placements`], and for each top-level style rule whose selector parses
+/// but uses a namespace prefix no `@namespace` before it declares, that
+/// simple selector's span. A browser reads a stylesheet in order, so a
+/// prefix is declared only for the rules after its `@namespace`. Every rule
+/// after the first one that counts sees all the namespaces there will be.
+pub(crate) fn layout(sheet: &Stylesheet<'_>) -> (Vec<Placement>, Vec<Option<Span>>) {
     #[derive(PartialEq, PartialOrd)]
     enum Phase {
         Imports,
@@ -326,8 +337,11 @@ pub(crate) fn placements(sheet: &Stylesheet<'_>) -> Vec<Placement> {
     }
     let mut phase = Phase::Imports;
     let mut out = Vec::with_capacity(sheet.rules.len());
+    let mut undeclared = Vec::with_capacity(sheet.rules.len());
+    let mut ns = Namespaces::default();
     for rule in &sheet.rules {
         let mut place = Placement::InOrder;
+        let mut missing = None;
         match &rule.node {
             Rule::At(at) => {
                 let is = |n: &str| at.name.eq_ignore_ascii_case(n);
@@ -339,22 +353,45 @@ pub(crate) fn placements(sheet: &Stylesheet<'_>) -> Vec<Placement> {
                 } else if is("namespace") {
                     if phase > Phase::Namespaces {
                         place = Placement::Misplaced;
-                    } else if parse_namespace_rule(&at.prelude).is_some() {
+                    } else if let Some(decl) = parse_namespace_rule(&at.prelude) {
                         phase = Phase::Namespaces;
+                        match decl.prefix {
+                            Some(p) => ns.prefixes.push((p, decl.uri)),
+                            None => ns.default = Some(decl.uri),
+                        }
                     }
                 } else if is_known_at_rule(&at.name) {
                     phase = Phase::Body;
                 }
             }
             Rule::Qualified(q) => {
-                if phase < Phase::Body && crate::selector::parse_selector_list(&q.prelude).is_ok() {
-                    phase = Phase::Body;
+                let parsed = (phase < Phase::Body || has_bar(&q.prelude))
+                    .then(|| crate::selector::parse_selector_list(&q.prelude).ok())
+                    .flatten();
+                if let Some(list) = parsed {
+                    missing = has_bar(&q.prelude)
+                        .then(|| list.undeclared_prefix(&ns))
+                        .flatten();
+                    if missing.is_none() {
+                        phase = Phase::Body;
+                    }
                 }
             }
         }
         out.push(place);
+        undeclared.push(missing);
     }
-    out
+    (out, undeclared)
+}
+
+/// Whether a `|` stands anywhere in `values`: only then can a selector name
+/// a namespace.
+pub(crate) fn has_bar(values: &[Spanned<ComponentValue<'_>>]) -> bool {
+    values.iter().any(|v| match &v.node {
+        ComponentValue::Token(t) => matches!(t, Token::Delim('|')),
+        ComponentValue::Function { args, .. } => has_bar(args),
+        ComponentValue::Block(b) => has_bar(&b.values),
+    })
 }
 
 /// Whether an `@supports` condition (or `@import`'s `supports(…)`) holds in

@@ -65,10 +65,17 @@ and tree nodes borrow from it.
   `spanned`).
 
 `SyntaxErrorKind`: `BadString`, `BadUrl`, `MalformedDeclaration`,
-`UnterminatedRule`, `UnterminatedBlock`, `UnexpectedToken`,
-`InvalidUnicodeRange`, `InvalidSelector`, `InvalidSelectorStructure`,
-`UnknownPseudo`, `NarrowedIdent`, `NestingTooDeep`,
-`DroppedCustomPropertyRule`.
+`UnterminatedRule`, `StrayCloseBrace`, `UnexpectedToken`,
+`UnterminatedComment`, `UnterminatedString`, `UnterminatedUrl`,
+`UnterminatedEscape`, `InvalidEscape`, `InvalidUnicodeRange`,
+`InvalidSelector`, `InvalidSelectorStructure`, `UnknownPseudo`,
+`NarrowedIdent`, `UndeclaredNamespacePrefix`, `NestingTooDeep`.
+
+An error is reported where CSS Syntax names a parse error, and nowhere else.
+A block, simple block or function that reaches the end of input is closed
+there without one, and a top-level `--foo:hover { … }` is dropped without one.
+`NestingTooDeep` is the exception: it is this parser's own limit, not a CSS
+error.
 
 ### Decoding
 
@@ -95,7 +102,10 @@ and `replacement` (decode only).
   `attribute`, `attribute_ns`, `is_html_document`) and three with defaults
   (`id`, `has_class`, `each_class`). Overriding `has_class` requires overriding
   `each_class` too, because the cascade finds rules through it.
-- `Namespaces::from_stylesheet` collects `@namespace` prefixes.
+- `Namespaces::from_stylesheet` collects `@namespace` prefixes. A selector
+  using a prefix they do not declare is invalid and matches nothing, inside
+  `:not()` too; `:is()` and `:where()` drop only that argument.
+  `undeclared_prefix` finds it.
 
 ### Cascade
 

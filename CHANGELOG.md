@@ -7,6 +7,47 @@ styloria is pre-1.0, so new features and breaking changes both land as
 minor-version bumps (`0.x.0`), per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Syntax errors follow CSS Syntax's parse errors.** Where the specification
+  names a parse error there is a `SyntaxError`, and where it names none there is
+  none. This breaks any code matching `SyntaxErrorKind`:
+  - `UnterminatedBlock` is gone. A rule's block, a simple block or a function
+    that reaches the end of input is closed there without a parse error
+    (§5.5.4, §5.5.9, §5.5.10), so `p { color: red` is a complete rule.
+  - `DroppedCustomPropertyRule` is gone. A top-level `--foo:hover { … }` is
+    still dropped, but §5.5.3 names no parse error for it.
+  - New: `UnterminatedComment`, `UnterminatedString`, `UnterminatedUrl` (a
+    comment, string or unquoted url that reaches the end of input),
+    `UnterminatedEscape` (a `\` as the last code point), `InvalidEscape` (a `\`
+    before a newline, outside a string), and `StrayCloseBrace` (a `}` in a
+    top-level rule's prelude, which reports alongside the rule's own error).
+- **A custom property's value must fit `<declaration-value>?`** (CSS Syntax 3
+  §7.2): `--x: a)`, `--x: { a ] }` and `--x: a ! b` are Invalid, report
+  `InvalidValue` and drop from the cascade.
+- **Only defined sub-pseudo-elements may follow a pseudo-element.**
+  `p::before::before` and `p::marker::before` are an `InvalidSelectorStructure`;
+  `::before::marker`, `::part(x)::before`, `::slotted(*)::marker` and
+  `::column::scroll-marker` are fine.
+
+### Added
+
+- **`SyntaxErrorKind::UndeclaredNamespacePrefix`**: a style rule whose selector
+  uses a prefix no `@namespace` before it declares (`svg|rect`, `[xlink|href]`).
+  Such a selector is invalid (CSS Namespaces 3). A prefix counts only for the
+  rules after its `@namespace`, and a rule dropped for it does not make a later
+  `@namespace` misplaced.
+- `SelectorList::undeclared_prefix` and `ComplexSelector::undeclared_prefix`.
+
+### Fixed
+
+- **A selector with an undeclared prefix matches nothing, `:not()` included.**
+  `:not(svg|rect)` matched every element when `svg` was not declared; the rule
+  is now dropped, in `matches` and in the cascade. `:is()` and `:where()` drop
+  only that argument.
+
 ## [0.19.0] - 2026-11-02
 
 ### Added

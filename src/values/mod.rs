@@ -35,7 +35,8 @@
 //!   (`symbols: ‣`), when the value read with it as a name code point fits,
 //!   or when that reading cannot be rebuilt: w3c/csswg-drafts#7129 is open.
 //!
-//! A custom property (`--*`) takes any value, and the CSS-wide keywords
+//! A custom property (`--*`) takes any value that fits `<declaration-value>?`
+//! (no `)`, `]` or `}` that closes nothing, no top-level `!`), and the CSS-wide keywords
 //! (`inherit`, `initial`, `unset`, `revert`, `revert-layer`, `revert-rule`) fit
 //! every property. They fit no descriptor but what its own grammar allows:
 //! CSS Values 4 §4.1.1 gives them to properties, and a descriptor is not
@@ -185,7 +186,11 @@ pub fn check_value(property: &str, value: &[Spanned<ComponentValue<'_>>]) -> Val
 /// [`check_value`] on the value's tokens as they stand.
 fn check_value_as_written(property: &str, value: &[Spanned<ComponentValue<'_>>]) -> ValueCheck {
     if property.starts_with("--") {
-        return ValueCheck::Valid;
+        return if is_declaration_value(value, true) {
+            ValueCheck::Valid
+        } else {
+            ValueCheck::Invalid
+        };
     }
     let property: std::borrow::Cow<'_, str> = if property.bytes().any(|b| b.is_ascii_uppercase()) {
         property.to_ascii_lowercase().into()
@@ -200,6 +205,21 @@ fn check_value_as_written(property: &str, value: &[Spanned<ComponentValue<'_>>])
     }
     let items = significant(value);
     cached(&property, &items)
+}
+
+/// Whether a custom property's value fits `<declaration-value>?` (CSS
+/// Syntax 3 §7.2): no `)`, `]` or `}` that closes nothing, at any depth, and
+/// no `!` at the top level (`!important` is already stripped). A bad string
+/// or bad url also fails it, but has its own syntax error, so it is left
+/// alone here. A top-level `;` cannot occur: it ends the declaration.
+fn is_declaration_value(value: &[Spanned<ComponentValue<'_>>], top: bool) -> bool {
+    value.iter().all(|v| match &v.node {
+        ComponentValue::Token(Token::RightParen | Token::RightSquare | Token::RightCurly) => false,
+        ComponentValue::Token(Token::Delim('!')) => !top,
+        ComponentValue::Token(_) => true,
+        ComponentValue::Function { args, .. } => is_declaration_value(args, false),
+        ComponentValue::Block(b) => is_declaration_value(&b.values, false),
+    })
 }
 
 /// Check a declaration inside an at-rule (`@font-face`, `@counter-style`,

@@ -31,6 +31,11 @@
 //!   `&` is) multiply the work by the tree's depth per level, so a hostile
 //!   stylesheet could otherwise make one answer take hours.
 //!
+//! A selector that uses a namespace prefix the [`Namespaces`] do not declare
+//! is invalid (CSS Namespaces 3, "CSS Qualified Names"), so it matches nothing, and neither does
+//! a list holding one: a browser drops the whole rule. Inside `:is()` and
+//! `:where()` only that argument is dropped.
+//!
 //! Unknown propagates as in three-valued logic: `:not(Unknown)` is Unknown,
 //! a compound is No as soon as one part is No, and a combinator is Yes as
 //! soon as one path is Yes.
@@ -42,6 +47,7 @@ use crate::selector::{
     AttributeCase, AttributeOperator, AttributeSelector, Combinator, ComplexSelector,
     CompoundSelector, Namespace, PseudoClass, QualifiedName, SelectorList, SimpleSelector,
 };
+use crate::span::Span;
 
 /// The most steps one call to [`SelectorList::matches`] or
 /// [`ComplexSelector::matches`] takes, arguments included; past it the
@@ -192,17 +198,79 @@ impl Namespaces<'_> {
 }
 
 impl SelectorList<'_> {
-    /// Whether any selector in the list matches `element`.
+    /// Whether any selector in the list matches `element`. No when one of
+    /// them uses an undeclared namespace prefix: the list is invalid.
     pub fn matches<E: Element>(&self, element: &E, namespaces: &Namespaces<'_>) -> Match {
+        if self.undeclared_prefix(namespaces).is_some() {
+            return Match::No;
+        }
         Matcher::new(namespaces).list(self, element)
+    }
+
+    /// The first simple selector in the list that uses a namespace prefix
+    /// `namespaces` does not declare, outside the arguments of `:is()` and
+    /// `:where()`, which drop such an argument on their own. Its span is the
+    /// simple selector's (`svg|rect`, `[xlink|href]`).
+    pub fn undeclared_prefix(&self, namespaces: &Namespaces<'_>) -> Option<Span> {
+        self.selectors
+            .iter()
+            .find_map(|s| s.node.undeclared_prefix(namespaces))
     }
 }
 
 impl ComplexSelector<'_> {
     /// Whether this selector matches `element`, as its subject (the last
-    /// compound).
+    /// compound). No when it uses an undeclared namespace prefix.
     pub fn matches<E: Element>(&self, element: &E, namespaces: &Namespaces<'_>) -> Match {
+        if self.undeclared_prefix(namespaces).is_some() {
+            return Match::No;
+        }
         Matcher::new(namespaces).complex(self, element)
+    }
+
+    /// [`matches`](Self::matches) for a selector already known to use no
+    /// undeclared prefix: the cascade drops such rules when it is built, and
+    /// skips the check per element.
+    pub(crate) fn matches_declared<E: Element>(
+        &self,
+        element: &E,
+        namespaces: &Namespaces<'_>,
+    ) -> Match {
+        Matcher::new(namespaces).complex(self, element)
+    }
+
+    /// [`matches_pseudo`](Self::matches_pseudo) on the same terms as
+    /// [`matches_declared`](Self::matches_declared).
+    pub(crate) fn matches_pseudo_declared<E: Element>(
+        &self,
+        element: &E,
+        namespaces: &Namespaces<'_>,
+        pseudo: &str,
+    ) -> Match {
+        Matcher::new(namespaces).complex_pseudo(self, element, &pseudo_name(pseudo))
+    }
+
+    /// [`SelectorList::undeclared_prefix`] for this one selector.
+    pub fn undeclared_prefix(&self, namespaces: &Namespaces<'_>) -> Option<Span> {
+        let undeclared = |ns: Option<&Namespace<'_>>| matches!(ns, Some(Namespace::Prefix(p)) if namespaces.resolve(p).is_none());
+        let in_list = |list: &SelectorList<'_>| list.undeclared_prefix(namespaces);
+        self.compounds
+            .iter()
+            .flat_map(|c| &c.node.simples)
+            .find_map(|s| match &s.node {
+                SimpleSelector::Type(q) => undeclared(q.namespace.as_ref()).then_some(s.span),
+                SimpleSelector::Universal(ns) => undeclared(ns.as_ref()).then_some(s.span),
+                SimpleSelector::Attribute(a) => {
+                    undeclared(a.name.namespace.as_ref()).then_some(s.span)
+                }
+                SimpleSelector::PseudoClass(
+                    PseudoClass::Not(list)
+                    | PseudoClass::Has(list)
+                    | PseudoClass::NthChild { of: Some(list), .. }
+                    | PseudoClass::NthLastChild { of: Some(list), .. },
+                ) => in_list(list),
+                _ => None,
+            })
     }
 
     /// Whether this selector styles the pseudo-element `pseudo` of `element`:
@@ -217,6 +285,9 @@ impl ComplexSelector<'_> {
         namespaces: &Namespaces<'_>,
         pseudo: &str,
     ) -> Match {
+        if self.undeclared_prefix(namespaces).is_some() {
+            return Match::No;
+        }
         Matcher::new(namespaces).complex_pseudo(self, element, &pseudo_name(pseudo))
     }
 }
@@ -473,7 +544,15 @@ impl<'n, 'a> Matcher<'n, 'a> {
             }
             PseudoClass::Not(list) => self.list(list, element).not(),
             PseudoClass::Is { selectors, dropped } | PseudoClass::Where { selectors, dropped } => {
-                let m = self.list(selectors, element);
+                // The forgiving parse drops an argument with an undeclared
+                // prefix, as it drops any invalid one.
+                let m = any(
+                    selectors
+                        .selectors
+                        .iter()
+                        .filter(|s| s.node.undeclared_prefix(self.namespaces).is_none()),
+                    |s| self.complex(&s.node, element),
+                );
                 if *dropped > 0 {
                     m.or(Match::Unknown)
                 } else {
@@ -596,7 +675,7 @@ fn index(before: usize) -> i32 {
 }
 
 /// Yes as soon as one item matches; Unknown if none did but one might.
-fn any<T>(items: &[T], mut f: impl FnMut(&T) -> Match) -> Match {
+fn any<'i, T: 'i>(items: impl IntoIterator<Item = &'i T>, mut f: impl FnMut(&T) -> Match) -> Match {
     let mut m = Match::No;
     for item in items {
         m = m.or(f(item));
@@ -937,6 +1016,17 @@ mod tests {
         assert_eq!(at("image", &none), Match::Yes);
         assert_eq!(at("svg|image", &declared), Match::Yes);
         assert_eq!(at("svg|image", &none), Match::No, "undeclared prefix");
+        // An undeclared prefix makes the selector invalid, not just false:
+        // `:not()` of it is no match either, nor is a list holding it.
+        assert_eq!(at(":not(svg|image)", &none), Match::No);
+        assert_eq!(at(":not([xl|href])", &none), Match::No);
+        assert_eq!(at("image, svg|image", &none), Match::No);
+        assert_eq!(at(":not(svg|image)", &declared), Match::No);
+        assert_eq!(at(":not(svg|rect)", &declared), Match::Yes);
+        // `:is()` and `:where()` drop that argument and keep the rest.
+        assert_eq!(at(":is(svg|image, image)", &none), Match::Yes);
+        assert_eq!(at(":where(svg|image)", &none), Match::No);
+        assert_eq!(at(":is(:not(svg|image), image)", &none), Match::Yes);
         assert_eq!(at("*|image", &none), Match::Yes);
         assert_eq!(at("|image", &none), Match::No);
         assert_eq!(at("image", &html_default), Match::No, "default namespace");
