@@ -73,7 +73,9 @@ pub struct SimpleBlock<'a> {
 }
 
 /// The contents of a rule's `{ … }`, in source order. The span covers the
-/// braces; for a block that is never closed, it runs to the end of input.
+/// braces; for a block that is never closed, it runs to the end of the last
+/// token in the input. A comment is no token, so in `a { color: red /* x */`
+/// the block ends before the comment.
 pub type Block<'a> = Spanned<Vec<BlockItem<'a>>>;
 
 /// A `selector { … }` rule, at any depth. Its prelude is handed on as
@@ -214,7 +216,7 @@ pub enum SyntaxErrorKind {
     /// A *block* that reaches the end of input is not an error: §5.5 closes
     /// a rule's block, a simple block and a function there without naming a
     /// parse error, so `p { color: red` is a complete rule. Its span runs to
-    /// the end of input.
+    /// the end of the last token, before any comment that closes the input.
     UnterminatedRule,
     /// A `}` in the prelude of a top-level qualified rule (§5.5.3), which
     /// becomes part of that prelude: `} p { … }`. The span is the `}`. The
@@ -1594,6 +1596,13 @@ mod tests {
 
     #[test]
     fn blocks_closed_by_the_end_of_input_are_not_errors() {
+        // The span ends at the last token: a trailing comment is no token.
+        let css = "a { color: red /* x */";
+        let (sheet, _) = parse_stylesheet(css);
+        assert_eq!(
+            sheet.rules[0].node.block().unwrap().span.slice(css),
+            "{ color: red "
+        );
         // §5.5.4, §5.5.9 and §5.5.10 name no parse error there.
         for css in [
             "a { color: red",

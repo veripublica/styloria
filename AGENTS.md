@@ -20,8 +20,9 @@ Rules the code follows:
   Yes, No or Unknown. What cannot be settled from the input is Unknown, with
   a reason where the API has one, never a guess.
 - **Errs toward silence.** A value is invalid only when even a lenient reading
-  fails. Custom properties (`--*`), vendor-prefixed names and `var()` are
-  left alone.
+  fails. Vendor-prefixed names and `var()` are left alone, and a custom
+  property (`--*`) is invalid only outside `<declaration-value>?`, as in
+  `--x: a)`.
 - **Bounded on hostile input.** See [Limits](#limits).
 
 ## What it declines to do
