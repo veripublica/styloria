@@ -9,6 +9,8 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-11-18
+
 ### Changed
 
 - **`Block` is a struct, with a new `closed` field.** It was an alias of
