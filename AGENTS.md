@@ -304,6 +304,18 @@ epubveri ships WebAssembly. `Cargo.lock` is not committed, since this is a
 library. A dependency, even a dev one, is not added casually: there are none
 today.
 
+CI also checks out
+[epub-test-books](https://github.com/veripublica/epub-test-books) at a pinned
+tag, unzips the books' `.css` files and names the directory in
+`STYLORIA_TEST_BOOKS_CSS`. `tests/test_books.rs` then checks styloria's own
+invariants on them:
+- decoding works, and a lossless decode encodes back;
+- nothing panics;
+- every span lies in the text;
+- serializing is a fixed point.
+
+Without the variable, that test says it skipped.
+
 Any change to the tokenizer or the parser's hot paths should be measured on
 real stylesheets, not only on synthetic tests.
 

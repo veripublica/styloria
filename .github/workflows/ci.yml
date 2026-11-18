@@ -38,6 +38,40 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      # The stylesheets of epub-test-books, at a pinned tag (the commit it
+      # names, so a moved tag cannot change what is tested). tests/test_books.rs
+      # checks styloria's own invariants on them; the sets' expected results
+      # are verifier findings, not ours. `unzip` is the runner's: no Cargo
+      # dependency, not even a dev one. Its exit code 11 means a book holds
+      # no .css file; some books are broken containers on purpose, which
+      # unzip refuses. Both are counted and skipped.
+      - name: Check out epub-test-books
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: veripublica/epub-test-books
+          ref: c06f11981b713171683ed327a960e9c50be217d6 # v0.7.0
+          path: test-books
+          persist-credentials: false
+
+      - name: Unzip the test books' stylesheets
+        run: |
+          out="$RUNNER_TEMP/test-books-css"
+          mkdir -p "$out"
+          n=0 none=0 refused=0
+          while IFS= read -r -d '' book; do
+            n=$((n + 1))
+            rc=0
+            unzip -qq -o -C "$book" '*.css' -d "$out/$n" 2>/dev/null || rc=$?
+            case $rc in
+              0) ;;
+              11) none=$((none + 1)) ;;
+              *) refused=$((refused + 1)) ;;
+            esac
+          done < <(find test-books/books -name '*.epub' -print0 | sort -z)
+          css=$(find "$out" -iname '*.css' | wc -l)
+          echo "$n books: $css stylesheets, $none without one, $refused refused by unzip"
+          echo "STYLORIA_TEST_BOOKS_CSS=$out" >> "$GITHUB_ENV"
+
       - name: Test
         run: cargo test --all-features
 
