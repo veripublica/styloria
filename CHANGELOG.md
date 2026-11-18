@@ -29,6 +29,10 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   - `:current` after `::search-text`;
   - `:only-child` after the view-transition pseudo-elements below
     `::view-transition`.
+
+  `:is()` and `:where()` pass the restriction to their arguments and, being
+  forgiving, drop the ones it rules out: `p::before:is(.x)` is valid, with an
+  empty `:is()` (`dropped: 1`) that matches nothing.
 - **`::part()::part()` is valid.** CSS Pseudo-Elements 4 §5 allows every
   pseudo-element after an element-backed one, and such a selector never
   matches. 0.20 reported it as an `InvalidSelectorStructure`.

@@ -1050,7 +1050,7 @@ fn compound<'a>(
         let vendor = last_pseudo_element
             .as_deref()
             .is_some_and(|pe| pe.starts_with('-'));
-        let (s, n) = if vendor {
+        let (mut s, n) = if vendor {
             let mut own = None;
             let r = simple(part, i, depth, &mut own)?;
             if let Some(e) = own {
@@ -1065,7 +1065,7 @@ fn compound<'a>(
         } else {
             simple(part, i, depth, structure)?
         };
-        let in_order = match &s.node {
+        let in_order = match &mut s.node {
             // Type and universal come first; CSS Nesting lets `&` go before.
             SimpleSelector::Type(_) | SimpleSelector::Universal(_) => simples
                 .iter()
@@ -1137,30 +1137,31 @@ fn may_follow(prev: &str, next: &str) -> bool {
 ///   below its root (CSS View Transitions 1 §3.1).
 ///
 /// `:is()` and `:where()` pass the restriction to their arguments, but they
-/// are forgiving, so an argument it rules out is dropped, not an error.
+/// are forgiving, so an argument it rules out is dropped, not an error: this
+/// function removes it from `pc` and counts it in `dropped`, and an `:is()`
+/// left empty is valid and matches nothing.
 /// `:not()` is not forgiving: each argument must be a compound of
 /// pseudo-classes that may follow `pe` themselves. `:has()` is not a logical
 /// combination pseudo-class. A vendor-prefixed name on either side is left
 /// alone, as everywhere in this crate.
-fn class_may_follow(pe: &str, pc: &PseudoClass<'_>) -> bool {
+fn class_may_follow(pe: &str, pc: &mut PseudoClass<'_>) -> bool {
     let pe = pe.to_ascii_lowercase();
     if pe.starts_with('-') || matches!(pe.as_str(), "part" | "details-content") {
         return true;
     }
     match pc {
-        PseudoClass::Is { .. } | PseudoClass::Where { .. } => true,
-        PseudoClass::Not(list) => list.selectors.iter().all(|c| {
-            c.node.leading.is_none()
-                && c.node.compounds.len() == 1
-                && c.node.compounds[0]
-                    .node
-                    .simples
-                    .iter()
-                    .all(|s| match &s.node {
-                        SimpleSelector::PseudoClass(inner) => class_may_follow(&pe, inner),
-                        _ => false,
-                    })
-        }),
+        PseudoClass::Is { selectors, dropped } | PseudoClass::Where { selectors, dropped } => {
+            let before = selectors.selectors.len();
+            selectors
+                .selectors
+                .retain_mut(|c| argument_may_follow(&pe, &mut c.node));
+            *dropped += before - selectors.selectors.len();
+            true
+        }
+        PseudoClass::Not(list) => list
+            .selectors
+            .iter_mut()
+            .all(|c| argument_may_follow(&pe, &mut c.node)),
         PseudoClass::OnlyChild => matches!(
             pe.as_str(),
             "view-transition-group"
@@ -1195,6 +1196,22 @@ fn class_may_follow(pe: &str, pc: &PseudoClass<'_>) -> bool {
         }
         _ => false,
     }
+}
+
+/// Whether an argument of a logical combination pseudo-class meets the
+/// restriction after `pe` (lowercase): a single compound of pseudo-classes
+/// that may follow `pe` themselves.
+fn argument_may_follow(pe: &str, c: &mut ComplexSelector<'_>) -> bool {
+    c.leading.is_none()
+        && c.compounds.len() == 1
+        && c.compounds[0]
+            .node
+            .simples
+            .iter_mut()
+            .all(|s| match &mut s.node {
+                SimpleSelector::PseudoClass(inner) => class_may_follow(pe, inner),
+                _ => false,
+            })
 }
 
 /// One simple selector at `i`, and how many component values it took.
@@ -2039,6 +2056,59 @@ mod tests {
         assert!(!from5.matches(4) && from5.matches(5) && from5.matches(50));
         let never = AnB { a: -2, b: -1 };
         assert!((1..100).all(|i| !never.matches(i)));
+    }
+
+    /// After a pseudo-element, `:is()` and `:where()` pass the restriction
+    /// to their arguments and, being forgiving, drop the ones it rules out
+    /// (Selectors 4 §3.6.3): `p::before:is(.x)` keeps an empty `:is()`, which
+    /// matches nothing. Nested ones are filtered too, and the exemptions
+    /// (element-backed, vendor) keep every argument.
+    #[test]
+    fn logical_arguments_after_a_pseudo_element_are_restricted() {
+        fn last_is(css: &str) -> (usize, usize) {
+            let list = parse(css);
+            let simples = &list.selectors[0].node.compounds[0].node.simples;
+            match &simples.last().unwrap().node {
+                SimpleSelector::PseudoClass(
+                    PseudoClass::Is { selectors, dropped }
+                    | PseudoClass::Where { selectors, dropped },
+                ) => (selectors.selectors.len(), *dropped),
+                other => panic!("{other:?}"),
+            }
+        }
+        for (css, kept_dropped) in [
+            ("p::before:is(.x)", (0, 1)),
+            ("p::before:where(:first-child)", (0, 1)),
+            ("p::before:is(:hover, .x, a:focus, :focus :hover)", (1, 3)),
+            ("p::before:is(:not(:hover), :not(.x))", (1, 1)),
+            ("p::before:is(:hover, , !)", (1, 1)),
+            ("p:is(.x)", (1, 0)),
+            ("x-a::part(a):is(.x)", (1, 0)),
+            ("details::details-content:where(:checked)", (1, 0)),
+            ("p::-webkit-x:is(.x)", (1, 0)),
+            ("div::scroll-button(up):is(:disabled, .x)", (1, 1)),
+        ] {
+            assert_eq!(last_is(css), kept_dropped, "{css}");
+        }
+        // Nested: the inner `:is()` loses `.x` and is itself kept.
+        let list = parse("p::before:is(:is(.x, :hover))");
+        let SimpleSelector::PseudoClass(PseudoClass::Is {
+            selectors,
+            dropped: 0,
+        }) = &list.selectors[0].node.compounds[0].node.simples[2].node
+        else {
+            panic!()
+        };
+        let SimpleSelector::PseudoClass(PseudoClass::Is { selectors, dropped }) =
+            &selectors.selectors[0].node.compounds[0].node.simples[0].node
+        else {
+            panic!()
+        };
+        assert_eq!((selectors.selectors.len(), *dropped), (1, 1));
+        // Dropping is not an error; `:not()` is not forgiving.
+        assert_eq!(sel_errors("p::before:is(.x) { color: red }"), 0);
+        assert_eq!(sel_errors("p::before:not(:is(.x)) { color: red }"), 0);
+        assert_eq!(sel_errors("p::before:not(.x) { color: red }"), 1);
     }
 
     #[test]
