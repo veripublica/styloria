@@ -22,7 +22,9 @@
 //!   selector piece, but they are put together in a way Selectors does not
 //!   allow — an id that is not an identifier (`#1a`), a type selector after
 //!   another simple selector (`[x]p`), anything but a pseudo-class or
-//!   pseudo-element after a pseudo-element (`p::before.x`), a pseudo-element
+//!   pseudo-element after a pseudo-element (`p::before.x`), a pseudo-class
+//!   no specification allows after that pseudo-element (`p::before:first-child`;
+//!   `p::before:hover` is fine), a pseudo-element
 //!   after a pseudo-element that does not define it as its sub-pseudo-element
 //!   (`p::before::before`; `p::before::marker` is fine), a pseudo-element
 //!   before the last compound (`p::before span`), an `An+B` that does not
@@ -1046,7 +1048,9 @@ fn compound<'a>(
             SimpleSelector::Type(_) | SimpleSelector::Universal(_) => simples
                 .iter()
                 .all(|p| matches!(p.node, SimpleSelector::Nesting)),
-            SimpleSelector::PseudoClass(_) => true,
+            SimpleSelector::PseudoClass(pc) => last_pseudo_element
+                .as_deref()
+                .is_none_or(|pe| class_may_follow(pe, pc)),
             SimpleSelector::PseudoElement(pe) => {
                 after_pseudo_element = true;
                 let ok = last_pseudo_element
@@ -1069,11 +1073,13 @@ fn compound<'a>(
 
 /// Whether the pseudo-element `next` may come right after `prev`, as a
 /// sub-pseudo-element. Only the specifications' own pairs are: `::marker` of
-/// `::before` and `::after` (CSS Pseudo-Elements 4), any pseudo-element but
-/// another `::part()` after a `::part()` (CSS Shadow Parts 1), a
-/// tree-abiding pseudo-element after `::slotted()` (CSS Scoping 1), and
-/// `::column::scroll-marker` (CSS Overflow 5). A vendor-prefixed name on
-/// either side is left alone, as everywhere in this crate.
+/// `::before` and `::after` (CSS Pseudo-Elements 4), any pseudo-element after
+/// an element-backed one, `::part()` or `::details-content` (CSS
+/// Pseudo-Elements 4 §5; `::part()::part()` is valid and never matches, CSS
+/// Shadow 1 §5.4), a tree-abiding pseudo-element after `::slotted()` (CSS
+/// Shadow 1 §3.2.4), and `::column::scroll-marker` (CSS Overflow 5). A
+/// vendor-prefixed name on either side is left alone, as everywhere in this
+/// crate.
 fn may_follow(prev: &str, next: &str) -> bool {
     let prev = prev.to_ascii_lowercase();
     let next = next.to_ascii_lowercase();
@@ -1082,11 +1088,91 @@ fn may_follow(prev: &str, next: &str) -> bool {
         || next.starts_with('-')
         || match prev.as_str() {
             "before" | "after" => next == "marker",
-            "part" => next != "part",
+            // Element-backed (CSS Pseudo-Elements 4 §5): every
+            // pseudo-element is syntactically allowed after it, though
+            // `::part()` there never matches.
+            "part" | "details-content" => true,
             "slotted" => tree_abiding,
             "column" => next == "scroll-marker",
             _ => false,
         }
+}
+
+/// Whether the pseudo-class `pc` may come right after the pseudo-element
+/// `pe`. Selectors 4 §3.6.3 allows the user action pseudo-classes and the
+/// logical combination ones after any pseudo-element, and makes every other
+/// combination an invalid selector unless a specification allows it:
+///
+/// - anything after an element-backed pseudo-element, `::part()` and
+///   `::details-content` (CSS Pseudo-Elements 4 §5: syntactically allowed,
+///   though some never match);
+/// - `:disabled` after `::scroll-button()`, and `:target-current`,
+///   `:target-before` and `:target-after` after `::scroll-marker` (CSS
+///   Overflow 5);
+/// - `:current`, without arguments, after `::search-text` (CSS
+///   Pseudo-Elements 4 §3.1; `:past` and `:future` are reserved, so not yet);
+/// - `:only-child` after the pseudo-elements a view transition's tree holds
+///   below its root (CSS View Transitions 1 §3.1).
+///
+/// `:is()` and `:where()` pass the restriction to their arguments, but they
+/// are forgiving, so an argument it rules out is dropped, not an error.
+/// `:not()` is not forgiving: each argument must be a compound of
+/// pseudo-classes that may follow `pe` themselves. `:has()` is not a logical
+/// combination pseudo-class. A vendor-prefixed name on either side is left
+/// alone, as everywhere in this crate.
+fn class_may_follow(pe: &str, pc: &PseudoClass<'_>) -> bool {
+    let pe = pe.to_ascii_lowercase();
+    if pe.starts_with('-') || matches!(pe.as_str(), "part" | "details-content") {
+        return true;
+    }
+    match pc {
+        PseudoClass::Is { .. } | PseudoClass::Where { .. } => true,
+        PseudoClass::Not(list) => list.selectors.iter().all(|c| {
+            c.node.leading.is_none()
+                && c.node.compounds.len() == 1
+                && c.node.compounds[0]
+                    .node
+                    .simples
+                    .iter()
+                    .all(|s| match &s.node {
+                        SimpleSelector::PseudoClass(inner) => class_may_follow(&pe, inner),
+                        _ => false,
+                    })
+        }),
+        PseudoClass::OnlyChild => matches!(
+            pe.as_str(),
+            "view-transition-group"
+                | "view-transition-group-children"
+                | "view-transition-image-pair"
+                | "view-transition-old"
+                | "view-transition-new"
+        ),
+        PseudoClass::Other { name, args } => {
+            let name = name.to_ascii_lowercase();
+            // Every name below but `current` exists only without arguments,
+            // so `:hover()` is already an unknown pseudo.
+            //
+            // Past `MAX_SELECTOR_DEPTH` a logical combination comes back
+            // unread, and unread arguments are not reported.
+            let unread = matches!(name.as_str(), "is" | "where" | "not") && args.is_some();
+            unread
+                || name.starts_with('-')
+                || matches!(
+                    name.as_str(),
+                    "hover" | "active" | "focus" | "focus-visible" | "focus-within"
+                )
+                || match pe.as_str() {
+                    "scroll-button" => name == "disabled",
+                    "scroll-marker" => matches!(
+                        name.as_str(),
+                        "target-current" | "target-before" | "target-after"
+                    ),
+                    "search-text" => name == "current" && args.is_none(),
+                    _ => false,
+                }
+        }
+        _ => false,
+    }
 }
 
 /// One simple selector at `i`, and how many component values it took.
@@ -1980,6 +2066,38 @@ mod tests {
             "::slotted(*)::marker { color: red }",
             "div::column::scroll-marker { color: red }",
             "p::-webkit-x::before { color: red }",
+            // After an element-backed pseudo-element, every pseudo-element
+            // is syntactically allowed; `::part()` there never matches.
+            "x-a::part(a)::part(b) { color: red }",
+            "details::details-content::before { color: red }",
+            // The pseudo-classes the specifications allow after one.
+            "p::before:hover { color: red }",
+            "p::first-line:active { color: red }",
+            "p::marker:focus-visible { color: red }",
+            "p::placeholder:focus-within { color: red }",
+            "p::before:is(.x) { color: red }",
+            "p::before:where(:first-child) { color: red }",
+            "p::before:not(:hover) { color: red }",
+            "p::before:not(:hover:focus, :active) { color: red }",
+            // Past the depth limit the arguments are not read.
+            &format!(
+                "p::before{}:hover{} {{ color: red }}",
+                ":not(".repeat(MAX_SELECTOR_DEPTH + 2),
+                ")".repeat(MAX_SELECTOR_DEPTH + 2)
+            ),
+            "x-a::part(a):first-child { color: red }",
+            "x-a::part(a):has(b) { color: red }",
+            "details::details-content:checked { color: red }",
+            "div::scroll-button(up):disabled { color: red }",
+            "div::column::scroll-marker:target-current { color: red }",
+            "a::scroll-marker:target-before { color: red }",
+            "a::scroll-marker:target-after { color: red }",
+            "::search-text:current { color: red }",
+            "::view-transition-new(x):only-child { color: red }",
+            "::view-transition-old(*):only-child { color: red }",
+            "::view-transition-group(x):only-child { color: red }",
+            "p::before:-moz-x { color: red }",
+            "p::-webkit-x:first-child { color: red }",
             "a[href=\"x\" q] { color: red }",
             "a[ href = \"x\" ] { color: red }",
             // Namespaces.
@@ -2075,8 +2193,31 @@ mod tests {
             ("p::after::after", S),
             ("p::marker::before", S),
             ("p::first-line::first-letter", S),
-            ("x-a::part(a)::part(b)", S),
             ("::slotted(*)::first-line", S),
+            // A pseudo-class no specification allows after the
+            // pseudo-element (Selectors 4 §3.6.3).
+            ("p::before:first-child", S),
+            ("p:before:first-child", S),
+            ("p::after:checked", S),
+            ("p::first-line:link", S),
+            ("p::marker:nth-child(2)", S),
+            ("p::before:has(a)", S),
+            ("p::before:lang(en)", S),
+            ("p::before:not(:first-child)", S),
+            ("p::before:not(.x)", S),
+            ("p::before:not(:hover, a)", S),
+            ("p::before:not(:not(:empty))", S),
+            ("p::before:hover:empty", S),
+            ("p::before:not(:hover):empty", S),
+            ("::slotted(*):first-child", S),
+            ("p::before:disabled", S),
+            ("div::scroll-button(up):target-current", S),
+            ("p::before:target-current", S),
+            ("::search-text:past", S),
+            ("::search-text:future", S),
+            ("::search-text:current(p)", S),
+            ("::view-transition:only-child", S),
+            ("::view-transition-new(x):first-child", S),
             // Arguments that are all valid pieces, wrongly put together.
             ("p:not(#1a)", S),
             ("a:has()", S),

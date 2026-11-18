@@ -15,6 +15,23 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   `Spanned<Vec<BlockItem>>`; its `node` and `span` fields keep their names, so
   code that only reads a block still builds. Code that builds one, or names
   the alias's type, does not.
+- **Only the pseudo-classes a specification allows may follow a
+  pseudo-element** (Selectors 4 §3.6.3). Any other one makes the selector an
+  `InvalidSelectorStructure`, and the rule is dropped: `p::before:first-child`,
+  `p::after:checked` and `p::before:not(.x)` are now in this group. These stay
+  valid:
+  - the user action pseudo-classes, `:is()`, `:where()`, and a `:not()` of
+    allowed pseudo-classes (`p::before:hover`, `p::before:not(:focus)`), after
+    any pseudo-element;
+  - anything after `::part()` and `::details-content`;
+  - `:disabled` after `::scroll-button()`, and `:target-current`,
+    `:target-before` and `:target-after` after `::scroll-marker`;
+  - `:current` after `::search-text`;
+  - `:only-child` after the view-transition pseudo-elements below
+    `::view-transition`.
+- **`::part()::part()` is valid.** CSS Pseudo-Elements 4 §5 allows every
+  pseudo-element after an element-backed one, and such a selector never
+  matches. 0.20 reported it as an `InvalidSelectorStructure`.
 
 ### Added
 
