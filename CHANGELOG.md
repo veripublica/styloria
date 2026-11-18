@@ -42,6 +42,12 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   an at-risk section of CSS Sizing 3. The CSSWG resolved to drop that section
   (w3c/csswg-drafts#14574, 2026-10-26), so under Multicol 2's
   `auto | <length [0,∞]>` they are Invalid and report `InvalidValue`.
+- **`ui-serif`, `ui-sans-serif`, `ui-monospace` and `ui-rounded` are no family
+  names.** CSS Fonts 4 §2.1.1 keeps every `<generic-font-family>` keyword out
+  of `<font-family-name>`, so `@font-face { font-family: ui-serif }` and
+  `font-family: ui-serif foo` are Invalid, as `serif` already was. WebKit,
+  Gecko and Blink all accept the `@font-face` form. As a generic family,
+  `font-family: ui-serif` stays Valid.
 
 ### Added
 

@@ -670,11 +670,12 @@ const CSS_WIDE: [&str; 6] = [
     "revert-rule",
 ];
 
-/// `<generic-font-complete>` (CSS Fonts 4 §2.1.2), which an unquoted family
-/// name cannot be or start with. `<generic-font-incomplete>` (`ui-serif`, …)
-/// is not here: the same text excludes it, but all of WebKit, Gecko and Blink
-/// keep `@font-face { font-family: ui-serif }`, so that is not certain.
-const GENERIC_FAMILIES: [&str; 7] = [
+/// The `<generic-font-family>` keywords (CSS Fonts 4 §2.1.2), complete and
+/// incomplete, which an unquoted family name cannot be or start with (§2.1.1:
+/// "UAs must not consider these keywords as matching the
+/// `<font-family-name>` type"). That holds for `ui-serif` and its kind too, although WebKit, Gecko
+/// and Blink all keep `@font-face { font-family: ui-serif }`.
+const GENERIC_FAMILIES: [&str; 11] = [
     "serif",
     "sans-serif",
     "system-ui",
@@ -682,6 +683,10 @@ const GENERIC_FAMILIES: [&str; 7] = [
     "fantasy",
     "math",
     "monospace",
+    "ui-serif",
+    "ui-sans-serif",
+    "ui-monospace",
+    "ui-rounded",
 ];
 
 /// Whether `word` is a keyword in `set`, in any ASCII case.
