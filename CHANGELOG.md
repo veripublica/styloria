@@ -32,6 +32,11 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 - **`::part()::part()` is valid.** CSS Pseudo-Elements 4 §5 allows every
   pseudo-element after an element-backed one, and such a selector never
   matches. 0.20 reported it as an `InvalidSelectorStructure`.
+- **A pseudo-class right after a vendor-prefixed pseudo-element is not an
+  `UnknownPseudo`.** WebKit's scrollbar pseudo-classes are unprefixed
+  (`::-webkit-scrollbar:horizontal`, `:decrement`, `:window-inactive`), and
+  a prefixed name was already exempt. A pseudo-element after it, or an error
+  inside a known pseudo-class's arguments, is still reported.
 
 ### Added
 

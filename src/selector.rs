@@ -47,7 +47,9 @@
 //! "Invalid Selectors and Error Handling"), and a browser drops the rule.
 //! The names come from MDN's data and the specs' Editor's Drafts
 //! (`src/pseudos.rs`), and vendor-prefixed ones are never reported, since
-//! a false report lands on somebody's real stylesheet.
+//! a false report lands on somebody's real stylesheet. Neither is a
+//! pseudo-class right after a vendor-prefixed pseudo-element: WebKit's
+//! scrollbar ones are unprefixed (`::-webkit-scrollbar:horizontal`).
 //!
 //! **Deliberately permissive, in two named places:**
 //!
@@ -1042,7 +1044,27 @@ fn compound<'a>(
         if is_whitespace(&cv.node) || combinator(&cv.node).is_some() {
             break;
         }
-        let (s, n) = simple(part, i, depth, structure)?;
+        // After a vendor-prefixed pseudo-element the vendor's own
+        // pseudo-classes follow, unprefixed (`::-webkit-scrollbar:horizontal`):
+        // an unknown name there is not reported, as a prefixed one is not.
+        let vendor = last_pseudo_element
+            .as_deref()
+            .is_some_and(|pe| pe.starts_with('-'));
+        let (s, n) = if vendor {
+            let mut own = None;
+            let r = simple(part, i, depth, &mut own)?;
+            if let Some(e) = own {
+                let vendors_class = e.kind == SyntaxErrorKind::UnknownPseudo
+                    && e.span.start == cv.span.start
+                    && matches!(r.0.node, SimpleSelector::PseudoClass(_));
+                if !vendors_class {
+                    note_error(structure, e);
+                }
+            }
+            r
+        } else {
+            simple(part, i, depth, structure)?
+        };
         let in_order = match &s.node {
             // Type and universal come first; CSS Nesting lets `&` go before.
             SimpleSelector::Type(_) | SimpleSelector::Universal(_) => simples
@@ -2098,6 +2120,9 @@ mod tests {
             "::view-transition-group(x):only-child { color: red }",
             "p::before:-moz-x { color: red }",
             "p::-webkit-x:first-child { color: red }",
+            "p::-webkit-scrollbar:horizontal { color: red }",
+            "p::-webkit-scrollbar-button:vertical:decrement { color: red }",
+            "p::-webkit-scrollbar-thumb:window-inactive { color: red }",
             "a[href=\"x\" q] { color: red }",
             "a[ href = \"x\" ] { color: red }",
             // Namespaces.
@@ -2252,6 +2277,24 @@ mod tests {
             ("a:not(:hovr) { color: red }", vec![U], Some(":hovr")),
             ("a:has(> b:hovr) { color: red }", vec![U], Some(":hovr")),
             ("p { &:hovr { color: red } }", vec![U], Some(":hovr")),
+            // After a vendor pseudo-element only the vendor's classes are
+            // exempt: a pseudo-element, or an error inside a known
+            // pseudo-class, is still reported.
+            (
+                "p::-webkit-x::befor { color: red }",
+                vec![U],
+                Some("::befor"),
+            ),
+            (
+                "p::-webkit-x:not(:hovr) { color: red }",
+                vec![U],
+                Some(":hovr"),
+            ),
+            (
+                "p::before:horizontal { color: red }",
+                vec![U],
+                Some(":horizontal"),
+            ),
             // Known, in any case, in either colon form for CSS 2's four.
             (
                 "a:HOVER, p:Before, p::AFTER, p:first-letter { color: red }",
