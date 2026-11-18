@@ -7,6 +7,23 @@ styloria is pre-1.0, so new features and breaking changes both land as
 minor-version bumps (`0.x.0`), per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Changed
+
+- **`Block` is a struct, with a new `closed` field.** It was an alias of
+  `Spanned<Vec<BlockItem>>`; its `node` and `span` fields keep their names, so
+  code that only reads a block still builds. Code that builds one, or names
+  the alias's type, does not.
+
+### Added
+
+- **`Block::closed`**: true when the block's own `}` closed it, false when
+  the end of input did (§5.5.4 names no parse error, so since 0.20 no
+  `SyntaxError` says so). Reading this off the source is not safe: a block
+  that never closed can end in a `}` byte of a token it dropped, as in
+  `p { "}`, `p { ; \}` or `p { a: b; [}`.
+
 ## [0.20.0] - 2026-11-12
 
 ### Changed

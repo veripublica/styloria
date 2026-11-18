@@ -78,6 +78,10 @@ there without one, and a top-level `--foo:hover { … }` is dropped without one.
 `NestingTooDeep` is the exception: it is this parser's own limit, not a CSS
 error.
 
+A rule's `Block` says which: `closed` is true when its own `}` closed it,
+false when the end of input did. The source text cannot tell you this alone:
+`p { "}` ends in a `}` byte and never closed.
+
 ### Decoding
 
 - `decode_stylesheet(bytes, protocol, environment)` follows CSS Syntax's

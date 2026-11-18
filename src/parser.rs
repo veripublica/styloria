@@ -72,11 +72,33 @@ pub struct SimpleBlock<'a> {
     pub values: Vec<Spanned<ComponentValue<'a>>>,
 }
 
-/// The contents of a rule's `{ … }`, in source order. The span covers the
-/// braces; for a block that is never closed, it runs to the end of the last
-/// token in the input. A comment is no token, so in `a { color: red /* x */`
-/// the block ends before the comment.
-pub type Block<'a> = Spanned<Vec<BlockItem<'a>>>;
+/// A rule's `{ … }`: its items in source order, where it is, and whether
+/// its own `}` closed it.
+///
+/// ```
+/// let css = "p { color: red } q { color: blue";
+/// let (sheet, errors) = styloria::parse_stylesheet(css);
+/// assert!(errors.is_empty()); // §5.5.4: the end of input is no parse error
+/// let p = sheet.rules[0].node.block().unwrap();
+/// let q = sheet.rules[1].node.block().unwrap();
+/// assert!(p.closed && !q.closed);
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct Block<'a> {
+    /// The declarations and rules inside, in source order.
+    pub node: Vec<BlockItem<'a>>,
+    /// Covers the braces. For a block that is never closed, it runs to the
+    /// end of the last token in the input. A comment is no token, so in
+    /// `a { color: red /* x */` the block ends before the comment.
+    pub span: Span,
+    /// True when the block's own `}` closed it, false when the end of input
+    /// did (§5.5.4 calls that no parse error, so no [`SyntaxError`] says it).
+    ///
+    /// The source text cannot answer this alone. A block that never closed
+    /// can still end in a `}` byte, the last byte of a token it dropped:
+    /// `p { "}`, `p { ; \}` and `p { a: b; [}` are all open at the end.
+    pub closed: bool,
+}
 
 /// A `selector { … }` rule, at any depth. Its prelude is handed on as
 /// component values; [`crate::selector`] reads it as a selector list.
@@ -880,7 +902,12 @@ impl<'a> Parser<'a> {
         let open_span = self.toks[open].span;
         let close = self.close[open];
         if nested && self.depth >= MAX_NESTING_DEPTH {
-            return self.refuse(open);
+            let refused: Spanned<Vec<BlockItem<'a>>> = self.refuse(open);
+            return Block {
+                node: refused.node,
+                span: refused.span,
+                closed: close < self.toks.len(),
+            };
         }
         if nested {
             self.depth += 1;
@@ -888,7 +915,8 @@ impl<'a> Parser<'a> {
         self.pos = open + 1;
         let items = self.block_contents(ctx);
         debug_assert!(self.pos == close || (close == self.toks.len() && self.pos == close));
-        let end = if close < self.toks.len() {
+        let closed = close < self.toks.len();
+        let end = if closed {
             self.pos = close + 1;
             self.toks[close].span
         } else {
@@ -900,7 +928,11 @@ impl<'a> Parser<'a> {
         if nested {
             self.depth -= 1;
         }
-        Spanned::new(items, open_span.to(end))
+        Block {
+            node: items,
+            span: open_span.to(end),
+            closed,
+        }
     }
 
     /// Report the refusal and skip the bracketed group at `open` whole.
@@ -1616,6 +1648,91 @@ mod tests {
         let (sheet, _) = parse_stylesheet(css);
         assert_eq!(shape(css), ["d:color"]);
         assert_eq!(sheet.rules[0].span.slice(css), css);
+    }
+
+    /// Every block of the sheet, depth first, as `(closed, span text)`.
+    fn closed_blocks(css: &str) -> Vec<(bool, &str)> {
+        fn walk<'s>(items: &[BlockItem<'_>], css: &'s str, out: &mut Vec<(bool, &'s str)>) {
+            for i in items {
+                if let BlockItem::Rule(r) = i
+                    && let Some(b) = r.node.block()
+                {
+                    out.push((b.closed, b.span.slice(css)));
+                    walk(&b.node, css, out);
+                }
+            }
+        }
+        let (sheet, _) = parse_stylesheet(css);
+        let mut out = Vec::new();
+        for r in &sheet.rules {
+            if let Some(b) = r.node.block() {
+                out.push((b.closed, b.span.slice(css)));
+                walk(&b.node, css, &mut out);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_block_says_whether_its_own_brace_closed_it() {
+        for (css, want) in [
+            ("p { }", true),
+            ("p {}", true),
+            ("@media print { }", true),
+            ("p {", false),
+            ("p { color: red", false),
+            ("p { color: red /* } */", false),
+            // A `}` inside a bracket the block left open is that bracket's.
+            ("p { a: f(}", false),
+            ("p { a: [}", false),
+            // The last byte is a `}` of a token the block dropped.
+            ("p { \"}", false),
+            ("p { ; \\}", false),
+            ("p { a: b; [}", false),
+            ("p { url(}", false),
+            ("p { a: b; \"}", false),
+        ] {
+            let got = closed_blocks(css);
+            assert_eq!(got.len(), 1, "{css}: {got:?}");
+            assert_eq!(got[0].0, want, "{css}: {got:?}");
+        }
+        // Open blocks nest: everything still open at the end closes there.
+        assert_eq!(
+            closed_blocks("@media print { p { a: b } q { r { x: y }"),
+            [
+                (false, "{ p { a: b } q { r { x: y }"),
+                (true, "{ a: b }"),
+                (false, "{ r { x: y }"),
+                (true, "{ x: y }"),
+            ]
+        );
+        assert_eq!(
+            closed_blocks("p { a: b } q { c: d"),
+            [(true, "{ a: b }"), (false, "{ c: d")]
+        );
+    }
+
+    #[test]
+    fn a_refused_block_still_says_whether_it_closed() {
+        let deep = |tail: &str| {
+            let mut css = "a{".repeat(MAX_NESTING_DEPTH + 2);
+            css.push_str(tail);
+            css
+        };
+        let innermost = |css: &str| {
+            let (sheet, errs) = parse_stylesheet(css);
+            assert!(
+                errs.iter()
+                    .any(|e| e.kind == SyntaxErrorKind::NestingTooDeep)
+            );
+            let mut b = sheet.rules[0].node.block().unwrap();
+            while let Some(BlockItem::Rule(r)) = b.node.first() {
+                b = r.node.block().unwrap();
+            }
+            b.closed
+        };
+        assert!(innermost(&deep(&"}".repeat(MAX_NESTING_DEPTH + 2))));
+        assert!(!innermost(&deep("")));
     }
 
     /// Each of §4.3's parse errors that no token carries, with its span.
