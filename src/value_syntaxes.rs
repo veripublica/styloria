@@ -2406,26 +2406,6 @@ pub(crate) const TYPE_SYNTAXES: &[(&str, &str)] = &[
 ];
 
 pub(crate) const UNKNOWN_KEYWORDS: &[(&str, &[&str])] = &[
-    (
-        "column-width",
-        &[
-            "stretch",
-            "contain",
-            "min-content",
-            "max-content",
-            "fit-content",
-        ],
-    ),
-    (
-        "columns",
-        &[
-            "stretch",
-            "contain",
-            "min-content",
-            "max-content",
-            "fit-content",
-        ],
-    ),
     ("display", &["oeb-page-head", "oeb-page-foot"]),
     ("outline", &["invert"]),
     ("outline-color", &["invert"]),

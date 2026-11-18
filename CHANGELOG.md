@@ -37,6 +37,11 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   (`::-webkit-scrollbar:horizontal`, `:decrement`, `:window-inactive`), and
   a prefixed name was already exempt. A pseudo-element after it, or an error
   inside a known pseudo-class's arguments, is still reported.
+- **`column-width` and `columns` take no sizing keywords.** `stretch`,
+  `contain`, `min-content`, `max-content` and `fit-content` were Unknown, from
+  an at-risk section of CSS Sizing 3. The CSSWG resolved to drop that section
+  (w3c/csswg-drafts#14574, 2026-10-26), so under Multicol 2's
+  `auto | <length [0,∞]>` they are Invalid and report `InvalidValue`.
 
 ### Added
 

@@ -483,12 +483,30 @@ fn draft_values_are_valid() {
     );
 }
 
-/// CSS Sizing 3 §3.4 is "likey to be dropped" (w3c/csswg-drafts#14574).
+/// CSS Sizing 3 §3.4's additions to `column-width` are dropped
+/// (w3c/csswg-drafts#14574, resolved 2026-10-26): Multicol 2's grammar is
+/// `auto | <length [0,∞]>`.
 #[test]
-fn column_width_keywords_are_unsettled() {
-    for decl in ["column-width: min-content", "columns: fit-content"] {
+fn column_width_takes_no_sizing_keywords() {
+    for decl in [
+        "column-width: min-content",
+        "column-width: stretch",
+        "columns: fit-content",
+        "columns: max-content 2",
+    ] {
         assert!(
-            matches!(check(decl), ValueCheck::Unknown(_)),
+            matches!(check(decl), ValueCheck::Invalid),
+            "{decl}: {:?}",
+            check(decl)
+        );
+    }
+    for decl in [
+        "column-width: auto",
+        "column-width: 12em",
+        "columns: 12em 2",
+    ] {
+        assert!(
+            matches!(check(decl), ValueCheck::Valid),
             "{decl}: {:?}",
             check(decl)
         );
