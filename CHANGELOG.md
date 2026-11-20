@@ -9,6 +9,19 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`cssom_declarations` and `cssom_block_declarations`: does the parsed
+  stylesheet keep this declaration?** They return every declaration in source
+  order with a `Kept`: `Yes`, `No` with a `DropReason` and the span that drops
+  it, or `Unknown` with a `KeptUnknown`. The answer reflects what the CSS Object
+  Model holds, not what applies. A rule in a false `@supports` or `@media`
+  stays, and so does a `var()` value. The rule drops for an invalid selector,
+  an undeclared prefix, an unknown at-rule, an at-rule whose prelude fails its
+  grammar, or a place its context does not allow. Each at-rule's context
+  follows its specification: `@page` takes CSS Paged Media 3's page properties,
+  including `direction`. The results were checked against Firefox 160.
+
 ## [0.21.0] - 2026-11-18
 
 ### Changed

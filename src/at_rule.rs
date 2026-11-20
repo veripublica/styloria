@@ -418,6 +418,13 @@ pub fn evaluate_supports(condition: &Values<'_>) -> Match {
     supports_condition(&significant_values(condition), 0).unwrap_or(Match::No)
 }
 
+/// Whether an `@supports` prelude fits `<supports-condition>`. A rule whose
+/// prelude does not is invalid and dropped, while one whose condition is only
+/// false stays in the stylesheet.
+pub(crate) fn supports_condition_parses(condition: &Values<'_>) -> bool {
+    supports_condition(&significant_values(condition), 0).is_some()
+}
+
 fn significant_values<'v, 'a>(values: &'v Values<'a>) -> Vec<&'v Spanned<ComponentValue<'a>>> {
     values
         .iter()

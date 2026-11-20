@@ -12,7 +12,10 @@
 //! - decoding never fails on these bytes (a multi-byte legacy encoding may,
 //!   without the `legacy-cjk` feature), and a lossless decode encodes back to
 //!   them;
-//! - parsing, validating and reading selectors do not panic;
+//! - parsing, validating, reading selectors and asking which declarations
+//!   the parsed sheet keeps do not panic;
+//! - that answer covers every declaration of the tree once, in source order,
+//!   and its spans lie in the text too;
 //! - every span of the tree, of a syntax error and of a diagnostic lies in
 //!   the text, on character boundaries;
 //! - serializing is a fixed point: the text serialized once parses to a tree
@@ -21,9 +24,9 @@
 use std::path::{Path, PathBuf};
 
 use styloria::{
-    BlockItem, ComponentValue, DecodeError, Rule, Span, Spanned, decode_stylesheet,
-    encode_stylesheet, parse_selector_list, parse_stylesheet, serialize_stylesheet,
-    validate_parsed_stylesheet,
+    BlockItem, ComponentValue, DecodeError, Kept, Rule, Span, Spanned, cssom_declarations,
+    decode_stylesheet, encode_stylesheet, parse_selector_list, parse_stylesheet,
+    serialize_stylesheet, validate_parsed_stylesheet,
 };
 
 const VAR: &str = "STYLORIA_TEST_BOOKS_CSS";
@@ -96,6 +99,19 @@ fn check(bytes: &[u8]) -> Result<(), String> {
             spans.extend(errs.iter().map(|e| e.span));
         }
     }
+    let declarations: Vec<Span> = rule_declarations(&sheet);
+    let kept = cssom_declarations(&sheet);
+    if kept
+        .iter()
+        .map(|d| d.declaration.span)
+        .ne(declarations.iter().copied())
+    {
+        return Err("cssom_declarations does not give every declaration once, in order".into());
+    }
+    spans.extend(kept.iter().filter_map(|d| match d.kept {
+        Kept::Yes => None,
+        Kept::No { span, .. } | Kept::Unknown { span, .. } => Some(span),
+    }));
     if let Some(s) = spans.iter().find(|s| !in_text(**s, css)) {
         return Err(format!("span {}..{} outside the text", s.start, s.end));
     }
@@ -105,6 +121,28 @@ fn check(bytes: &[u8]) -> Result<(), String> {
         return Err("serializing is not a fixed point".into());
     }
     Ok(())
+}
+
+fn rule_declarations(sheet: &styloria::Stylesheet<'_>) -> Vec<Span> {
+    fn walk(items: &[BlockItem<'_>], out: &mut Vec<Span>) {
+        for item in items {
+            match item {
+                BlockItem::Declaration(d) => out.push(d.span),
+                BlockItem::Rule(r) => {
+                    if let Some(b) = r.node.block() {
+                        walk(&b.node, out);
+                    }
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for rule in &sheet.rules {
+        if let Some(b) = rule.node.block() {
+            walk(&b.node, &mut out);
+        }
+    }
+    out
 }
 
 fn in_text(s: Span, css: &str) -> bool {

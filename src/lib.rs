@@ -15,6 +15,8 @@
 //!   three-valued against the caller's tree through [`Element`].
 //! - [`cascade`]: which declarations could set a property on an element, and
 //!   which decides ([`Cascade`]).
+//! - [`cssom`]: which declarations the parsed stylesheet keeps
+//!   ([`cssom_declarations`]).
 //! - [`validate`] and [`values`]: unknown properties and descriptors, and
 //!   values that cannot fit their grammar ([`validate_parsed_stylesheet`],
 //!   [`check_value`], [`check_descriptor`]).
@@ -27,6 +29,7 @@ pub mod cascade;
 #[cfg(feature = "legacy-cjk")]
 mod cjk;
 mod css2_syntaxes;
+pub mod cssom;
 pub mod decode;
 mod descriptors;
 mod encodings;
@@ -57,6 +60,10 @@ pub use at_rule::{
 pub use cascade::{
     Candidate, Cascade, ElementStyle, MAX_IMPORT_DEPTH, PropertyAnswer, Setter, Sheet,
     StyleComparer, StyleComparison, StyleDifference, UnknownReason, UnknownReasons,
+};
+pub use cssom::{
+    CssomDeclaration, DeclarationContext, DropReason, Kept, KeptUnknown, cssom_block_declarations,
+    cssom_declarations,
 };
 pub use decode::{
     DecodeError, Decoded, EncodeError, Encoding, LabelSource, charset_rule, decode_stylesheet,

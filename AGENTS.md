@@ -156,6 +156,41 @@ caller's and is not compared.
 `UnknownReason`: `Selector`, `Conditional`, `ConditionalSheet`, `Nested`,
 `Logical`, `Prefixed`, `Revert`, `NarrowedIdent`.
 
+### CSSOM
+
+`cssom_declarations(&sheet)` and `cssom_block_declarations(&items)` (a `style`
+attribute) return every declaration in source order as a `CssomDeclaration`
+(`declaration`, `context`, `kept`). The field `kept` says whether the parsed
+stylesheet, the CSS Object Model a browser builds, still holds the declaration:
+
+- `Kept::Yes`: it is there, even when nothing applies it. A rule inside a false
+  `@supports` or `@media` condition stays, and so does a `var()` value.
+- `Kept::No { reason, span }`: it is dropped. `span` is what drops it, the
+  outermost cause when there are several. `DropReason`: `InvalidValue`,
+  `InvalidSelector`, `UndeclaredPrefix`, `UnknownAtRule`, `InvalidAtRule`,
+  `InvalidLayer`, `InvalidSupports`, `NotAllowedHere`, `ImportantNotAllowed`.
+- `Kept::Unknown { reason, span }`: the specifications leave it open, or this
+  crate cannot tell. A drop inside it still gives `No`. `KeptUnknown`: `Value`,
+  `VendorSelector`, `Selector7129`, `NonstandardAtRule`, `UnreadAtRule`,
+  `PageSelector`, `PageUndefined`, `KeyframeAnimationProperty`,
+  `ImportantDescriptor`.
+
+`DeclarationContext`: `Style`, `Keyframe`, `Page`, `PageMargin`, `Descriptors`,
+`PositionTry`, `Unread`.
+
+It differs from the cascade, which asks what can style an element. The cascade
+drops a false `@supports` and skips `@font-face`; this does neither. The
+contexts follow their specifications:
+- `@page` takes the page properties of CSS Paged Media 3 Appendix A.1, and a
+  margin rule those of A.2;
+- a keyframe drops `!important`;
+- `@position-try` takes only its own properties.
+
+The results were checked against Firefox 160's `cssRules` on about 125
+stylesheets. Two cases follow the specification instead:
+- Firefox drops `@page { direction: rtl }`;
+- Firefox drops `font-family` in `@font-face { p { … } font-family: x }`.
+
 ### At-rule preludes
 
 `parse_namespace_rule`, `parse_import_rule`, `parse_layer_rule` and
@@ -264,7 +299,7 @@ those. It is one browser and a horizontal, left-to-right shelf.
 ## Layout
 
 No `tests/` directory: tests sit beside the code, in `#[cfg(test)]` modules and
-`src/values/tests.rs`, plus doc tests.
+`src/values/tests.rs` and `src/cssom/tests.rs`, plus doc tests.
 
 | Path | Holds |
 | --- | --- |
@@ -276,6 +311,7 @@ No `tests/` directory: tests sit beside the code, in `#[cfg(test)]` modules and
 | `src/selector.rs`, `src/matching.rs` | Selector tree and specificity; matching |
 | `src/narrowed.rs` | The reading from before csswg-drafts#7129 |
 | `src/cascade.rs` | The per-element query |
+| `src/cssom.rs` | Which declarations the parsed sheet keeps |
 | `src/at_rule.rs` | At-rule preludes, `evaluate_supports` |
 | `src/validate.rs`, `src/values/` | Diagnostics; value grammars |
 | `src/properties.rs` | Shorthands and logical properties |
@@ -312,6 +348,7 @@ invariants on them:
 - decoding works, and a lossless decode encodes back;
 - nothing panics;
 - every span lies in the text;
+- `cssom_declarations` gives every declaration once, in source order;
 - serializing is a fixed point.
 
 Without the variable, that test says it skipped.
