@@ -9,6 +9,8 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-11-21
+
 ### Added
 
 - **`cssom_declarations` and `cssom_block_declarations`: does the parsed

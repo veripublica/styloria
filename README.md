@@ -11,8 +11,9 @@ you can use it without the rest.
 It follows CSS Syntax Level 3 and gives you the whole stylesheet as a tree, with
 the byte position of every node and every syntax error it recovered from. On
 top of that it can tell you which properties and values are wrong, match
-selectors against your own document tree, and say which declaration sets a
-property on an element. When the stylesheet alone can't settle something, such
+selectors against your own document tree, say which declaration sets a
+property on an element, and say which declarations a browser keeps in the
+parsed stylesheet and which it drops. When the stylesheet alone can't settle something, such
 as whether `:hover` matches, it answers Unknown instead of guessing.
 
 ```sh
