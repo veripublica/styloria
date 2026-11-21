@@ -49,7 +49,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: veripublica/epub-test-books
-          ref: 57807b0df4a1e3d961be986d6b895157db90bb17 # v0.8.0
+          ref: 3a4bc7c95edde5372f99ebeb037ba4b1cf96545b # v0.9.1
           path: test-books
           persist-credentials: false
 
