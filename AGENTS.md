@@ -344,13 +344,13 @@ cargo test
 cargo test --all-features
 cargo build --lib --target wasm32-unknown-unknown
 cargo build --lib --target wasm32-unknown-unknown --all-features
-cargo +1.88 check --lib
+cargo +1.95 check --lib
 ```
 
-The minimum supported Rust version is 1.88. The wasm32 builds matter because
-epubveri ships WebAssembly. `Cargo.lock` is not committed, since this is a
-library. A dependency, even a dev one, is not added casually: there are none
-today.
+The minimum supported Rust version is 1.95, the one version every veripublica
+crate declares. The wasm32 builds matter because epubveri ships WebAssembly.
+`Cargo.lock` is not committed, since this is a library. A dependency, even a
+dev one, is not added casually: there are none today.
 
 CI also checks out
 [epub-test-books](https://github.com/veripublica/epub-test-books) at a pinned

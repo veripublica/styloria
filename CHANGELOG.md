@@ -9,6 +9,14 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **The minimum supported Rust version is now 1.95** (was 1.88). Every
+  veripublica crate now declares the same version, so one toolchain builds
+  them all. Nothing in styloria needs it. With Cargo's MSRV-aware resolver
+  (resolver 3, the edition 2024 default), a project on an older toolchain
+  stays on 0.23.0.
+
 ## [0.23.0] - 2026-11-22
 
 ### Added
