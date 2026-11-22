@@ -9,6 +9,8 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ## [Unreleased]
 
+## [0.23.1] - 2026-11-22
+
 ### Changed
 
 - **The minimum supported Rust version is now 1.95** (was 1.88). Every
