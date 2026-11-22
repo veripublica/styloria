@@ -18,7 +18,9 @@
 //! can say which it was. Unknown covers:
 //!
 //! - state and other pseudo-classes this code does not answer (`:hover`,
-//!   `:visited`, `:lang()`, `:has()`, vendor and future names);
+//!   `:visited`, `:lang()`, `:has()`, vendor and future names), unless the
+//!   caller answers an argument-less one through
+//!   [`Element::pseudo_class`];
 //! - `&`, whose meaning is the parent rule's selector;
 //! - a relative selector's leading combinator (`> a` in a nested rule);
 //! - `:is()`/`:where()` arguments the forgiving parse dropped;
@@ -70,11 +72,14 @@ pub enum Match {
     Unknown,
 }
 
-impl Match {
-    fn from_bool(b: bool) -> Match {
+impl From<bool> for Match {
+    /// `true` is Yes, `false` is No.
+    fn from(b: bool) -> Match {
         if b { Match::Yes } else { Match::No }
     }
+}
 
+impl Match {
     /// Both: No if either is No, Yes if both are Yes.
     pub fn and(self, other: Match) -> Match {
         match (self, other) {
@@ -166,6 +171,43 @@ pub trait Element: Clone {
                 f(w);
             }
         }
+    }
+
+    /// Whether the element is in the state an argument-less pseudo-class
+    /// names, which the tree does not say: `"link"`, `"visited"`,
+    /// `"any-link"`, `"active"`, `"hover"`, `"focus"` and the rest, vendor
+    /// and unknown names included. `name` is ASCII-lowercased, without the
+    /// colon. The default answers Unknown.
+    ///
+    /// The matcher asks it for every argument-less pseudo-class it does not
+    /// decide from the tree (`:root`, `:empty`, `:first-child` and the other
+    /// structural ones it decides itself). Pseudo-classes with arguments
+    /// (`:lang()`, `:dir()`, `:state()`) and `:has()` stay Unknown, and so
+    /// does a pseudo-class after a pseudo-element (`::before:hover`), which
+    /// is the state of the box.
+    ///
+    /// It is asked on **every element the matcher walks to**, not only the
+    /// subject: `.toc:link span` asks it on the span's ancestors, `a:visited
+    /// > img` on the image's parent. A caller asking "what if every link were
+    /// unvisited" gets that only if [`parent`](Self::parent) and the sibling
+    /// methods return elements that answer the same way, which a wrapper type
+    /// returning `Self` does.
+    ///
+    /// Which elements are links is the host language's to say (Selectors 4
+    /// §8.1; in HTML, `a` and `area` with `href`), so it is the caller's.
+    /// Keeping the answers consistent is the caller's job too: nothing checks
+    /// that `link` and `visited` are not both Yes, or that `any-link` agrees
+    /// with them.
+    ///
+    /// Browsers apply only colour properties from rules that match through
+    /// `:visited` (`color`, `background-color`, the border, outline and
+    /// column-rule colours, `fill`, `stroke`, …), to keep a page from
+    /// learning the history. That is the browser's choice, not a rule of the
+    /// specifications (Selectors 4 §8.2), so the cascade does not apply it:
+    /// a `:visited` rule's `font-size` is as certain as its `color`.
+    fn pseudo_class(&self, name: &str) -> Match {
+        let _ = name;
+        Match::Unknown
     }
 }
 
@@ -424,8 +466,8 @@ impl<'n, 'a> Matcher<'n, 'a> {
         match simple {
             SimpleSelector::Type(name) => self.type_name(name, element),
             SimpleSelector::Universal(ns) => self.element_namespace(ns.as_ref(), element),
-            SimpleSelector::Id(id) => Match::from_bool(element.id() == Some(id.as_ref())),
-            SimpleSelector::Class(class) => Match::from_bool(element.has_class(class)),
+            SimpleSelector::Id(id) => Match::from(element.id() == Some(id.as_ref())),
+            SimpleSelector::Class(class) => Match::from(element.has_class(class)),
             SimpleSelector::Attribute(attr) => self.attribute(attr, element),
             SimpleSelector::PseudoClass(p) => self.pseudo_class(p, element),
             // The selector is about a box the element generates, not the
@@ -450,7 +492,7 @@ impl<'n, 'a> Matcher<'n, 'a> {
                 None => return Match::Yes,
             },
         };
-        Match::from_bool(element.namespace() == want)
+        Match::from(element.namespace() == want)
     }
 
     fn type_name<E: Element>(&self, name: &QualifiedName<'_>, element: &E) -> Match {
@@ -464,7 +506,7 @@ impl<'n, 'a> Matcher<'n, 'a> {
         } else {
             local == name.local.node
         };
-        ns.and(Match::from_bool(same))
+        ns.and(Match::from(same))
     }
 
     fn attribute<E: Element>(&self, attr: &AttributeSelector<'_>, element: &E) -> Match {
@@ -494,8 +536,8 @@ impl<'n, 'a> Matcher<'n, 'a> {
         let test =
             |insensitive: bool| attribute_test(want.operator, value, &want.value, insensitive);
         match &want.case {
-            AttributeCase::Insensitive => Match::from_bool(test(true)),
-            AttributeCase::Sensitive => Match::from_bool(test(false)),
+            AttributeCase::Insensitive => Match::from(test(true)),
+            AttributeCase::Sensitive => Match::from(test(false)),
             AttributeCase::Other(_) => Match::Unknown,
             AttributeCase::Default => {
                 let exact = test(false);
@@ -505,7 +547,7 @@ impl<'n, 'a> Matcher<'n, 'a> {
                 if html && exact != test(true) {
                     Match::Unknown
                 } else {
-                    Match::from_bool(exact)
+                    Match::from(exact)
                 }
             }
         }
@@ -513,20 +555,16 @@ impl<'n, 'a> Matcher<'n, 'a> {
 
     fn pseudo_class<E: Element>(&self, p: &PseudoClass<'_>, element: &E) -> Match {
         match p {
-            PseudoClass::Root => Match::from_bool(element.parent().is_none()),
-            PseudoClass::Empty => Match::from_bool(!element.has_children()),
-            PseudoClass::FirstChild => Match::from_bool(element.prev_sibling().is_none()),
-            PseudoClass::LastChild => Match::from_bool(element.next_sibling().is_none()),
-            PseudoClass::OnlyChild => Match::from_bool(
-                element.prev_sibling().is_none() && element.next_sibling().is_none(),
-            ),
-            PseudoClass::FirstOfType => {
-                Match::from_bool(count_of_type(element, E::prev_sibling) == 0)
+            PseudoClass::Root => Match::from(element.parent().is_none()),
+            PseudoClass::Empty => Match::from(!element.has_children()),
+            PseudoClass::FirstChild => Match::from(element.prev_sibling().is_none()),
+            PseudoClass::LastChild => Match::from(element.next_sibling().is_none()),
+            PseudoClass::OnlyChild => {
+                Match::from(element.prev_sibling().is_none() && element.next_sibling().is_none())
             }
-            PseudoClass::LastOfType => {
-                Match::from_bool(count_of_type(element, E::next_sibling) == 0)
-            }
-            PseudoClass::OnlyOfType => Match::from_bool(
+            PseudoClass::FirstOfType => Match::from(count_of_type(element, E::prev_sibling) == 0),
+            PseudoClass::LastOfType => Match::from(count_of_type(element, E::next_sibling) == 0),
+            PseudoClass::OnlyOfType => Match::from(
                 count_of_type(element, E::prev_sibling) == 0
                     && count_of_type(element, E::next_sibling) == 0,
             ),
@@ -537,10 +575,10 @@ impl<'n, 'a> Matcher<'n, 'a> {
                 self.nth(element, *nth, of.as_ref(), E::next_sibling)
             }
             PseudoClass::NthOfType(nth) => {
-                Match::from_bool(nth.matches(index(count_of_type(element, E::prev_sibling))))
+                Match::from(nth.matches(index(count_of_type(element, E::prev_sibling))))
             }
             PseudoClass::NthLastOfType(nth) => {
-                Match::from_bool(nth.matches(index(count_of_type(element, E::next_sibling))))
+                Match::from(nth.matches(index(count_of_type(element, E::next_sibling))))
             }
             PseudoClass::Not(list) => self.list(list, element).not(),
             PseudoClass::Is { selectors, dropped } | PseudoClass::Where { selectors, dropped } => {
@@ -557,6 +595,13 @@ impl<'n, 'a> Matcher<'n, 'a> {
                     m.or(Match::Unknown)
                 } else {
                     m
+                }
+            }
+            PseudoClass::Other { name, args: None } => {
+                if name.bytes().any(|b| b.is_ascii_uppercase()) {
+                    element.pseudo_class(&name.to_ascii_lowercase())
+                } else {
+                    element.pseudo_class(name)
                 }
             }
             PseudoClass::Has(_) | PseudoClass::Other { .. } => Match::Unknown,
@@ -581,7 +626,7 @@ impl<'n, 'a> Matcher<'n, 'a> {
                 n += 1;
                 cur = step(&e);
             }
-            return Match::from_bool(nth.matches(index(n)));
+            return Match::from(nth.matches(index(n)));
         };
         let itself = self.list(of, element);
         if itself == Match::No {
@@ -600,7 +645,7 @@ impl<'n, 'a> Matcher<'n, 'a> {
         if unsure {
             Match::Unknown
         } else {
-            itself.and(Match::from_bool(nth.matches(index(n))))
+            itself.and(Match::from(nth.matches(index(n))))
         }
     }
 }
@@ -714,6 +759,12 @@ mod tests {
     struct Doc {
         nodes: Vec<Node>,
         html: bool,
+        /// The link state `pseudo_class` answers for, the way a caller
+        /// would: `None` keeps the default, `Some(visited)` answers `link`,
+        /// `visited` and `any-link` for `a` with `href`, and `active` from
+        /// `active`.
+        visited: Option<bool>,
+        active: bool,
     }
 
     #[derive(Default)]
@@ -783,6 +834,19 @@ mod tests {
         }
         fn is_html_document(&self) -> bool {
             self.doc.html
+        }
+        fn pseudo_class(&self, name: &str) -> Match {
+            let Some(visited) = self.doc.visited else {
+                return Match::Unknown;
+            };
+            let link = self.node().name == "a" && self.attribute("href").is_some();
+            match name {
+                "any-link" => Match::from(link),
+                "link" => Match::from(link && !visited),
+                "visited" => Match::from(link && visited),
+                "active" if self.doc.active => Match::Yes,
+                _ => Match::Unknown,
+            }
         }
     }
 
@@ -1050,6 +1114,64 @@ mod tests {
         assert_eq!(rel.matches(&el, &Namespaces::default()), Match::Unknown);
         let el = El { doc: &d, i: 6 };
         assert_eq!(rel.matches(&el, &Namespaces::default()), Match::No);
+    }
+
+    /// html > body > (a.toc[href] > span, a (no href), p)
+    fn links(visited: Option<bool>) -> Doc {
+        let mut d = doc(
+            false,
+            &[
+                ("html", None, &[]),
+                ("body", Some(0), &[]),
+                ("a", Some(1), &[("class", "toc"), ("href", "#c1")]),
+                ("span", Some(2), &[]),
+                ("a", Some(1), &[("id", "anchor")]),
+                ("p", Some(1), &[]),
+            ],
+        );
+        d.visited = visited;
+        d
+    }
+
+    #[test]
+    fn the_caller_answers_state_pseudo_classes() {
+        use Match::*;
+        // The default: every state is Unknown, as before.
+        let d = links(None);
+        for s in [":link", ":visited", ":any-link", ":hover", "a:LINK"] {
+            assert_eq!(m(&d, 2, s), Unknown, "{s}");
+        }
+        let unvisited = links(Some(false));
+        let visited = links(Some(true));
+        for (i, s, if_unvisited, if_visited) in [
+            (2, ".toc:link", Yes, No),
+            (2, ".toc:visited", No, Yes),
+            (2, ":any-link", Yes, Yes),
+            (2, "a:LiNk", Yes, No), // the name reaches the caller lowercased
+            (2, ":not(:visited)", Yes, No),
+            (2, ":is(:link, :visited)", Yes, Yes),
+            (2, ":link:hover", Unknown, No),
+            (2, ":link:lang(en)", Unknown, No), // arguments stay Unknown
+            (2, ":link::before", No, No),       // a pseudo-element's subject
+            (4, ":link", No, No),               // no href: not a link
+            (4, ":any-link", No, No),
+            (5, ":visited", No, No),
+            // Asked on the ancestors the matcher walks to, not only the
+            // subject.
+            (3, ".toc:link span", Yes, No),
+            (3, ":visited > span", No, Yes),
+            (5, ".toc:link ~ p", Yes, No),
+            (5, ":any-link ~ p", Yes, Yes),
+            (5, ":any-link + p", No, No), // its previous sibling has no href
+        ] {
+            assert_eq!(m(&unvisited, i, s), if_unvisited, "{s} on #{i}, unvisited");
+            assert_eq!(m(&visited, i, s), if_visited, "{s} on #{i}, visited");
+        }
+        let mut active = links(Some(false));
+        active.active = true;
+        assert_eq!(m(&active, 2, ":link:active"), Yes);
+        assert_eq!(m(&active, 2, ":visited:active"), No);
+        assert_eq!(m(&active, 2, ":link:hover"), Unknown);
     }
 
     #[test]

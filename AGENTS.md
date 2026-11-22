@@ -100,13 +100,25 @@ and `replacement` (decode only).
   with `specificity()` on its nodes, `An+B` and `resolve_nesting`.
 - `SelectorList::matches(&element, &namespaces)` returns `Match`: `Yes`, `No`
   or `Unknown`. Unknown means the answer depends on something a static tree
-  does not say (`:hover`, `:has()`). Answers are about the element itself, so
-  a pseudo-element answers `No`.
+  does not say (`:hover`, `:has()`), unless the caller answers it through
+  `Element::pseudo_class`. Answers are about the element itself, so a
+  pseudo-element answers `No`.
 - `Element` is the caller's tree: nine required methods (`parent`,
   `prev_sibling`, `next_sibling`, `has_children`, `local_name`, `namespace`,
-  `attribute`, `attribute_ns`, `is_html_document`) and three with defaults
-  (`id`, `has_class`, `each_class`). Overriding `has_class` requires overriding
-  `each_class` too, because the cascade finds rules through it.
+  `attribute`, `attribute_ns`, `is_html_document`) and four with defaults
+  (`id`, `has_class`, `each_class`, `pseudo_class`). Overriding `has_class`
+  requires overriding `each_class` too, because the cascade finds rules through
+  it.
+- `pseudo_class(name)` answers an argument-less pseudo-class the tree does not
+  settle (`link`, `visited`, `active`, `hover`, …; lowercase, no colon). The
+  default is `Unknown`. A caller that fixes a state, such as "every link
+  unvisited", answers it. The matcher asks on every element it walks to, so
+  `parent()` and the sibling methods must return elements that answer the same
+  way. Which elements are links, and keeping the states consistent, are the
+  caller's. Pseudo-classes with arguments, `:has()`, and a pseudo-class after a
+  pseudo-element stay `Unknown`. Browsers take only colours from `:visited`
+  rules; the specifications leave that to them, so the cascade does not.
+- `Match` converts from `bool`.
 - `Namespaces::from_stylesheet` collects `@namespace` prefixes. A selector
   using a prefix they do not declare is invalid and matches nothing, inside
   `:not()` too; `:is()` and `:where()` drop only that argument.

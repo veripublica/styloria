@@ -1577,6 +1577,51 @@ mod tests {
     }
 
     const IMG: El = El(3);
+
+    /// The tree of `El`, asked as if every link (here `p#a`) were unvisited
+    /// or visited: what a caller writes to fix a link state. It returns
+    /// `Self` from every walk, so ancestors answer the same way.
+    #[derive(Clone, Copy)]
+    struct LinkState(El, bool);
+
+    impl Element for LinkState {
+        fn parent(&self) -> Option<Self> {
+            self.0.parent().map(|e| LinkState(e, self.1))
+        }
+        fn prev_sibling(&self) -> Option<Self> {
+            self.0.prev_sibling().map(|e| LinkState(e, self.1))
+        }
+        fn next_sibling(&self) -> Option<Self> {
+            self.0.next_sibling().map(|e| LinkState(e, self.1))
+        }
+        fn has_children(&self) -> bool {
+            self.0.has_children()
+        }
+        fn local_name(&self) -> &str {
+            self.0.local_name()
+        }
+        fn namespace(&self) -> Option<&str> {
+            self.0.namespace()
+        }
+        fn attribute(&self, local_name: &str) -> Option<&str> {
+            self.0.attribute(local_name)
+        }
+        fn attribute_ns(&self, uri: &str, local_name: &str) -> Option<&str> {
+            self.0.attribute_ns(uri, local_name)
+        }
+        fn is_html_document(&self) -> bool {
+            self.0.is_html_document()
+        }
+        fn pseudo_class(&self, name: &str) -> Match {
+            let link = self.0.0 == P_A.0;
+            match name {
+                "any-link" => Match::from(link),
+                "link" => Match::from(link && !self.1),
+                "visited" => Match::from(link && self.1),
+                _ => Match::Unknown,
+            }
+        }
+    }
     const P_A: El = El(2);
 
     fn leak(css: &str) -> &'static Stylesheet<'static> {
@@ -1634,6 +1679,47 @@ mod tests {
         let a = style.property(prop);
         a.decided_by()
             .map_or(vec![], |s| s.reasons.iter().collect())
+    }
+
+    #[test]
+    fn a_caller_fixes_the_link_state() {
+        // calibre's pair: one class colours unvisited links, another visited.
+        let css = ".x:link { color: blue } p.x:visited { color: purple }";
+        let c = cascade(&[css]);
+        let color = |s: Option<bool>| match s {
+            None => c.style_for(&P_A, None).property("color").status,
+            Some(v) => {
+                c.style_for(&LinkState(P_A, v), None)
+                    .property("color")
+                    .status
+            }
+        };
+        assert_eq!(color(None), Match::Unknown);
+        assert_eq!(color(Some(false)), Match::Yes);
+        assert_eq!(color(Some(true)), Match::Yes);
+        // Each state has its own winner: the other rule no longer applies.
+        for (visited, value) in [(false, "blue"), (true, "purple")] {
+            let style = c.style_for(&LinkState(P_A, visited), None);
+            let answer = style.property("color");
+            assert_eq!(answer.setters.len(), 1, "visited: {visited}");
+            let span = answer.setters[0].candidate.declaration.span;
+            assert!(
+                css[span.start..span.end].contains(value),
+                "visited: {visited}"
+            );
+        }
+        // Another element: neither rule applies.
+        let off = c.style_for(&LinkState(El(4), false), None);
+        assert_eq!(off.property("color").status, Match::No);
+        // Through an ancestor.
+        let c = cascade(&["body:visited img, :link ~ img { width: 1px }"]);
+        let width = |s| {
+            c.style_for(&LinkState(IMG, s), None)
+                .property("width")
+                .status
+        };
+        assert_eq!(width(false), Match::Yes);
+        assert_eq!(width(true), Match::No);
     }
 
     #[test]

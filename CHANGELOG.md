@@ -9,6 +9,18 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`Element::pseudo_class`: the caller can answer a state.** The matcher asks
+  it for every argument-less pseudo-class it cannot settle from the tree
+  (`:link`, `:visited`, `:any-link`, `:active`, `:hover`, …), on every element
+  it walks to. The default answers `Unknown`, as before, so nothing changes
+  until a caller overrides it. A caller asking "if every link were unvisited"
+  wraps its element type and answers `link`, `visited` and `any-link` for the
+  elements its host language calls links. Arguments (`:lang()`, `:dir()`),
+  `:has()` and a pseudo-class after a pseudo-element stay `Unknown`.
+- `impl From<bool> for Match`.
+
 ## [0.22.0] - 2026-11-21
 
 ### Added
