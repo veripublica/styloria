@@ -9,6 +9,8 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-11-22
+
 ### Added
 
 - **`Element::pseudo_class`: the caller can answer a state.** The matcher asks
